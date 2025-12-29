@@ -71,7 +71,7 @@ DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
     ),
     EnvMode.LIBERO: Checkpoint(
         config="pi05_libero",
-        dir="gs://openpi-assets/checkpoints/pi05_libero",
+        dir="/home/huggingface/models/openpi/openpi-assets/checkpoints/pi05_libero",
     ),
 }
 

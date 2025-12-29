@@ -1,3 +1,8 @@
+
+eval1.sh
+eval2.sh
+download_gs.py
+
 # Data directories.
 assets/
 checkpoints/
