@@ -1,5 +1,6 @@
 import collections
 import dataclasses
+import json
 import logging
 import math
 import pathlib
@@ -40,7 +41,9 @@ class Args:
     #################################################################################################################
     # Utils
     #################################################################################################################
+    save_video: bool = True  # Whether to save videos
     video_out_path: str = "data/libero/videos"  # Path to save videos
+    results_path: str = "data/libero/results.json"  # Path to save final results
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -165,13 +168,14 @@ def eval_libero(args: Args) -> None:
             total_episodes += 1
 
             # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            if args.save_video:
+                suffix = "success" if done else "failure"
+                task_segment = task_description.replace(" ", "_")
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=10,
+                )
 
             # Log current results
             logging.info(f"Success: {done}")
@@ -182,8 +186,21 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
+    final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0
+    logging.info(f"Total success rate: {final_success_rate}")
     logging.info(f"Total episodes: {total_episodes}")
+
+    if args.results_path:
+        results = {
+            "total_success_rate": final_success_rate,
+            "total_episodes": total_episodes,
+            "total_successes": total_successes,
+            "task_suite_name": args.task_suite_name,
+        }
+        pathlib.Path(args.results_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.results_path, "w") as f:
+            json.dump(results, f, indent=4)
+        logging.info(f"Results saved to {args.results_path}")
 
 
 def _get_libero_env(task, resolution, seed):
