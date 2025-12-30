@@ -43,9 +43,14 @@ class Args:
     #################################################################################################################
     save_video: bool = True  # Whether to save videos
     video_out_path: str = "data/libero/videos"  # Path to save videos
-    results_path: str = "data/libero/results.json"  # Path to save final results
+    results_path: str = "data/libero/eval_results/vanilla.json"  # Path to save final results
 
     seed: int = 7  # Random Seed (for reproducibility)
+
+    #################################################################################################################
+    # Acceleration parameters
+    #################################################################################################################
+    action_quan: int = 1  # action quantization factor
 
 
 def eval_libero(args: Args) -> None:
@@ -148,7 +153,11 @@ def eval_libero(args: Args) -> None:
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
-                        action_plan.extend(action_chunk[: args.replan_steps])
+                        if args.action_quan > 1:
+                            action_chunk = action_chunk[: args.replan_steps][:: args.action_quan]
+                        else:
+                            action_chunk = action_chunk[: args.replan_steps]
+                        action_plan.extend(action_chunk)
 
                     action = action_plan.popleft()
 
@@ -191,11 +200,16 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Total episodes: {total_episodes}")
 
     if args.results_path:
+        # Convert args to dict and filter out unwanted keys
+        args_dict = dataclasses.asdict(args)
+        keys_to_exclude = {"host", "port", "save_video", "video_out_path", "results_path"}
+        filtered_args = {k: v for k, v in args_dict.items() if k not in keys_to_exclude}
+
         results = {
+            **filtered_args,  # Merge filtered args into results
             "total_success_rate": final_success_rate,
             "total_episodes": total_episodes,
             "total_successes": total_successes,
-            "task_suite_name": args.task_suite_name,
         }
         pathlib.Path(args.results_path).parent.mkdir(parents=True, exist_ok=True)
         with open(args.results_path, "w") as f:
