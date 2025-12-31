@@ -10,7 +10,8 @@
             "request": "launch",
             "program": "${workspaceFolder}/scripts/serve_policy.py",
             "args": [
-                "--env", "LIBERO"
+                "--env", "LIBERO",
+                "--port", "8002"
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "2"

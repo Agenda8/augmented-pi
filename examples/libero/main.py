@@ -82,6 +82,8 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    success_episode_steps = []
+
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
         task = task_suite.get_task(task_id)
@@ -154,7 +156,7 @@ def eval_libero(args: Args) -> None:
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
                         if args.action_quan > 1:
-                            action_chunk = action_chunk[: args.replan_steps][:: args.action_quan]
+                            action_chunk = action_chunk[: args.replan_steps][args.action_quan - 1 :: args.action_quan]
                         else:
                             action_chunk = action_chunk[: args.replan_steps]
                         action_plan.extend(action_chunk)
@@ -166,6 +168,7 @@ def eval_libero(args: Args) -> None:
                     if done:
                         task_successes += 1
                         total_successes += 1
+                        success_episode_steps.append(t - args.num_steps_wait + 1)
                         break
                     t += 1
 
@@ -188,6 +191,7 @@ def eval_libero(args: Args) -> None:
 
             # Log current results
             logging.info(f"Success: {done}")
+            logging.info(f"steps taken: {t - args.num_steps_wait + 1}")
             logging.info(f"# episodes completed so far: {total_episodes}")
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
@@ -196,8 +200,11 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
     final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0
+    avg_success_steps = float(np.mean(success_episode_steps)) if success_episode_steps else 0.0
+
     logging.info(f"Total success rate: {final_success_rate}")
     logging.info(f"Total episodes: {total_episodes}")
+    logging.info(f"Average steps for successful episodes: {avg_success_steps:.2f}")
 
     if args.results_path:
         # Convert args to dict and filter out unwanted keys
@@ -210,6 +217,7 @@ def eval_libero(args: Args) -> None:
             "total_success_rate": final_success_rate,
             "total_episodes": total_episodes,
             "total_successes": total_successes,
+            "avg_success_steps": avg_success_steps,
         }
         pathlib.Path(args.results_path).parent.mkdir(parents=True, exist_ok=True)
         with open(args.results_path, "w") as f:
