@@ -109,6 +109,7 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             replay_images = []
+            episode_actions = []
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -134,6 +135,10 @@ def eval_libero(args: Args) -> None:
                     # Save preprocessed image for replay video
                     replay_images.append(img)
 
+                    # save frame image
+                    #imageio.imsave(f"data/libero/frame/vanilla/img_frame_{t:03d}.png", img)
+                    #imageio.imsave(f"data/libero/frame/vanilla/wrist_img_frame_{t:03d}.png", wrist_img)
+
                     if not action_plan:
                         # Finished executing previous action chunk -- compute new chunk
                         # Prepare observations dict
@@ -149,19 +154,19 @@ def eval_libero(args: Args) -> None:
                             ),
                             "prompt": str(task_description),
                         }
-
                         # Query model to get action
-                        action_chunk = client.infer(element)["actions"]
+                        response = client.infer(element)
+                        action_chunk = response["actions"]
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
+                        action_chunk = action_chunk[: args.replan_steps]
                         if args.action_quan > 1:
-                            action_chunk = action_chunk[: args.replan_steps][args.action_quan - 1 :: args.action_quan]
-                        else:
-                            action_chunk = action_chunk[: args.replan_steps]
+                            action_chunk = action_chunk[::-1][:: args.action_quan][::-1]
                         action_plan.extend(action_chunk)
 
                     action = action_plan.popleft()
+                    episode_actions.append(action)
 
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
@@ -178,6 +183,11 @@ def eval_libero(args: Args) -> None:
 
             task_episodes += 1
             total_episodes += 1
+
+            # Save actions
+            #action_save_path = pathlib.Path(args.video_out_path) / f"actions.npy"
+            #np.save(action_save_path, np.array(episode_actions))
+            #logging.info(f"Saved actions to {action_save_path}")
 
             # Save a replay video of the episode
             if args.save_video:

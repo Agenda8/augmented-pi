@@ -5,16 +5,37 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Serve Policy (LIBERO)",
+            "name": "Serve Policy",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/scripts/serve_policy.py",
             "args": [
                 "--env", "LIBERO",
-                "--port", "8002"
+                "--port", "8050"
             ],
             "env": {
                 "CUDA_VISIBLE_DEVICES": "2"
+            },
+            "cwd": "${workspaceFolder}",
+            "stopOnEntry": false,
+            "justMyCode": false,
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Simulation",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/libero/main.py",
+            "python": "${workspaceFolder}/examples/libero/.venv/bin/python",
+            "args": [
+                "--args.port", "8050",
+                "--args.no-save-video",
+                "--args.results-path", "data/libero/eval_results/0.json",
+                "--args.action-quan", "1"
+            ],
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "1",
+                "PYTHONPATH": "${workspaceFolder}/third_party/libero:${env:PYTHONPATH}"
             },
             "cwd": "${workspaceFolder}",
             "stopOnEntry": false,
