@@ -15,6 +15,8 @@ from openpi_client import websocket_client_policy as _websocket_client_policy
 import tqdm
 import tyro
 
+from accelerate.action_quant import action_quant
+
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
@@ -50,7 +52,10 @@ class Args:
     #################################################################################################################
     # Acceleration parameters
     #################################################################################################################
-    action_quan: int = 1  # action quantization factor
+    action_quant: bool = False  # Whether to use action quantization
+    action_quant_method: str = "fixed"  # "fixed" or "adaptive"
+    action_quant_steps: int = 2  # Number of steps to aggregate for "fixed" method
+    action_quant_threshold: float = 0.03  # Threshold for "adaptive" method
 
 
 def eval_libero(args: Args) -> None:
@@ -162,21 +167,14 @@ def eval_libero(args: Args) -> None:
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
                         action_chunk = action_chunk[: args.replan_steps]
 
-                        if args.action_quan > 1:
-                            n_full_steps = (len(action_chunk) // args.action_quan) * args.action_quan
-                            reshaped = action_chunk[:n_full_steps].reshape(-1, args.action_quan, 7)
-                            pose_deltas = reshaped[..., :6].sum(axis=1)
-                            gripper = reshaped[..., -1, 6:]
-                            main_part = np.concatenate([pose_deltas, gripper], axis=-1)
-                            if n_full_steps < len(action_chunk):
-                                remainder = action_chunk[n_full_steps:]
-                                rem_pose = remainder[..., :6].sum(axis=0, keepdims=True)
-                                rem_gripper = remainder[-1:, 6:]
-                                rem_part = np.concatenate([rem_pose, rem_gripper], axis=-1)
-                                action_chunk = np.concatenate([main_part, rem_part], axis=0)
-                            else:
-                                action_chunk = main_part
-                                
+                        if args.action_quant:
+                            action_chunk = action_quant(
+                                action_chunk, 
+                                args.action_quant_method,
+                                args.action_quant_steps,
+                                args.action_quant_threshold,
+                            )
+
                         action_plan.extend(action_chunk)
 
                     action = action_plan.popleft()
