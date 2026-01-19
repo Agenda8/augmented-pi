@@ -161,8 +161,22 @@ def eval_libero(args: Args) -> None:
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
                         action_chunk = action_chunk[: args.replan_steps]
+
                         if args.action_quan > 1:
-                            action_chunk = action_chunk[::-1][:: args.action_quan][::-1]
+                            n_full_steps = (len(action_chunk) // args.action_quan) * args.action_quan
+                            reshaped = action_chunk[:n_full_steps].reshape(-1, args.action_quan, 7)
+                            pose_deltas = reshaped[..., :6].sum(axis=1)
+                            gripper = reshaped[..., -1, 6:]
+                            main_part = np.concatenate([pose_deltas, gripper], axis=-1)
+                            if n_full_steps < len(action_chunk):
+                                remainder = action_chunk[n_full_steps:]
+                                rem_pose = remainder[..., :6].sum(axis=0, keepdims=True)
+                                rem_gripper = remainder[-1:, 6:]
+                                rem_part = np.concatenate([rem_pose, rem_gripper], axis=-1)
+                                action_chunk = np.concatenate([main_part, rem_part], axis=0)
+                            else:
+                                action_chunk = main_part
+                                
                         action_plan.extend(action_chunk)
 
                     action = action_plan.popleft()
