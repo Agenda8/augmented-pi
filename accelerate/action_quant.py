@@ -26,9 +26,6 @@ def action_quant(
     if action_chunk.ndim != 2 or action_chunk.shape[1] != 7:
         raise ValueError(f"Expected action_chunk shape (T, 7), got {action_chunk.shape}")
 
-    if action_chunk.shape[0] == 0:
-        return action_chunk
-
     if method == "adaptive":
         quant_action_chunk = corki_merge(action_chunk, adaptive_threshold)
     elif method == "fixed":
@@ -78,24 +75,31 @@ def get_waypoint_indices(action: np.ndarray, threshold: float) -> np.ndarray:
     # 核心思想：看轨迹是否是一条直线。如果是直线，中间的点到首尾连线的距离应该很小。
     # 如果偏离太大，说明发生了转弯，那个转弯点就是 Waypoint。
     # ---------------------------------------------------------
-    p_st = traj[0, :3]
+    start_idx = 0
     local_max_A = []
-    for jth in range(1, len(traj)):
-        p_ed = traj[jth, :3]
-        distance_max = 0.0
-        for kth in range(1, jth):
-            p = traj[kth, :3]
-            if np.degrees(np.arccos(np.dot(p_ed - p, p_ed - p_st) /
+    while start_idx + 2 < len(traj):
+        p_st = traj[start_idx, :3]
+        found = False
+        for jth in range(start_idx + 2, len(traj)):
+            p_ed = traj[jth, :3]
+            distance_max = 0.0
+            for kth in range(start_idx + 1, jth):
+                p = traj[kth, :3]
+                if np.degrees(np.arccos(np.dot(p_ed - p, p_ed - p_st) /
                                     (np.linalg.norm(p_ed - p) * np.linalg.norm(p_ed - p_st)))) > 90 or \
-               np.degrees(np.arccos(np.dot(p_st - p, p_st - p_ed) /
+                    np.degrees(np.arccos(np.dot(p_st - p, p_st - p_ed) /
                                     (np.linalg.norm(p_st - p) * np.linalg.norm(p_st - p_ed)))) > 90:
-                distance = 10000
-            else:
-                distance = np.sin(np.arccos(np.dot(p - p_st, p_ed - p_st) /
+                    distance = 10000
+                else:
+                    distance = np.sin(np.arccos(np.dot(p - p_st, p_ed - p_st) /
                                             (np.linalg.norm(p - p_st) * np.linalg.norm(p_ed - p_st)))) * np.linalg.norm(p - p_st)
-            distance_max = max(distance_max, distance)
-        if distance_max > threshold:
-            local_max_A.append(jth - 1)
+                distance_max = max(distance_max, distance)
+            if distance_max > threshold:
+                local_max_A.append(jth - 1)
+                start_idx = jth
+                found = True
+                break
+        if not found:
             break
     
     # ---------------------------------------------------------
@@ -127,8 +131,6 @@ def corki_merge(action_chunk: np.ndarray, threshold: float) -> np.ndarray:
     Merge actions by all significant waypoints.
     For each segment [prev_wp, wp], sum pose deltas and keep last gripper.
     """
-    if action_chunk.shape[0] == 0:
-        return action_chunk
 
     waypoints = get_waypoint_indices(action_chunk, threshold)
     if waypoints.size == 0:
@@ -143,11 +145,5 @@ def corki_merge(action_chunk: np.ndarray, threshold: float) -> np.ndarray:
         gripper = segment[-1:, 6:7]
         merged.append(np.concatenate([pose, gripper], axis=-1))
         start = end
-
-    if start < len(action_chunk):
-        remainder = action_chunk[start:]
-        pose = remainder[:, :6].sum(axis=0, keepdims=True)
-        gripper = remainder[-1:, 6:7]
-        merged.append(np.concatenate([pose, gripper], axis=-1))
 
     return np.concatenate(merged, axis=0)
