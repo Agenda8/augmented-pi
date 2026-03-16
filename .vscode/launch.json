@@ -14,7 +14,7 @@
                 "--port", "8050"
             ],
             "env": {
-                "CUDA_VISIBLE_DEVICES": "2"
+                "CUDA_VISIBLE_DEVICES": "3"
             },
             "cwd": "${workspaceFolder}",
             "stopOnEntry": false,
@@ -32,7 +32,8 @@
                 "--args.no-save-video",
                 "--args.results-path", "data/libero/eval_results/0.json",
                 "--args.action-quant", 
-                "--args.action-quant-method", "adaptive",
+                "--args.action-quant-method", "fixed",
+                "--args.action-quant-steps", "2",
                 "--args.action-quant-threshold", "0.03"
             ],
             "env": {

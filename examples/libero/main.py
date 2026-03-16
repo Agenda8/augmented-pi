@@ -88,6 +88,7 @@ def eval_libero(args: Args) -> None:
     # Start evaluation
     total_episodes, total_successes = 0, 0
     success_episode_steps = []
+    infer_counts_per_success = []
 
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
@@ -115,6 +116,7 @@ def eval_libero(args: Args) -> None:
             t = 0
             replay_images = []
             episode_actions = []
+            episode_infer_count = 0
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -161,6 +163,7 @@ def eval_libero(args: Args) -> None:
                         }
                         # Query model to get action
                         response = client.infer(element)
+                        episode_infer_count += 1
                         action_chunk = response["actions"]
                         assert (
                             len(action_chunk) >= args.replan_steps
@@ -186,6 +189,7 @@ def eval_libero(args: Args) -> None:
                         task_successes += 1
                         total_successes += 1
                         success_episode_steps.append(t - args.num_steps_wait + 1)
+                        infer_counts_per_success.append(episode_infer_count)
                         break
                     t += 1
 
@@ -216,6 +220,7 @@ def eval_libero(args: Args) -> None:
             logging.info(f"steps taken: {t - args.num_steps_wait + 1}")
             logging.info(f"# episodes completed so far: {total_episodes}")
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
+            logging.info(f"# model inferences for this episode: {episode_infer_count}")
 
         # Log final results
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
@@ -223,11 +228,12 @@ def eval_libero(args: Args) -> None:
 
     final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0.0
     avg_success_steps = float(np.mean(success_episode_steps)) if success_episode_steps else 0.0
+    avg_infer_count = float(np.mean(infer_counts_per_success)) if infer_counts_per_success else 0.0
 
     logging.info(f"Total success rate: {final_success_rate}")
     logging.info(f"Total episodes: {total_episodes}")
     logging.info(f"Average steps for successful episodes: {avg_success_steps:.2f}")
-
+    logging.info(f"Average model inferences: {avg_infer_count:.2f}")
     if args.results_path:
         # Convert args to dict and filter out unwanted keys
         args_dict = dataclasses.asdict(args)
@@ -240,6 +246,7 @@ def eval_libero(args: Args) -> None:
             "total_episodes": total_episodes,
             "total_successes": total_successes,
             "avg_success_steps": avg_success_steps,
+            "avg_infer_count": avg_infer_count,
         }
         pathlib.Path(args.results_path).parent.mkdir(parents=True, exist_ok=True)
         with open(args.results_path, "w") as f:
