@@ -46,7 +46,8 @@ class Args:
     save_video: bool = True  # Whether to save videos
     video_out_path: str = "data/libero/videos"  # Path to save videos
     results_path: str = "data/libero/eval_results/vanilla.json"  # Path to save final results
-
+    failure_path: str = "data/libero/failure"  # Path to save failed episode data for analysis
+    
     seed: int = 7  # Random Seed (for reproducibility)
 
     #################################################################################################################
@@ -114,6 +115,7 @@ def eval_libero(args: Args) -> None:
 
             # Setup
             t = 0
+            done = False
             replay_images = []
             episode_actions = []
             episode_infer_count = 0
@@ -204,6 +206,14 @@ def eval_libero(args: Args) -> None:
             #action_save_path = pathlib.Path(args.video_out_path) / f"actions.npy"
             #np.save(action_save_path, np.array(episode_actions))
             #logging.info(f"Saved actions to {action_save_path}")
+            # Failure analysis
+            if not done:
+                failed_path = pathlib.Path(args.failure_path) / f"episode_{total_episodes}"
+                failed_path.mkdir(parents=True, exist_ok=True)
+                np.save(failed_path / "actions.npy", np.array(episode_actions))
+                for frame_idx, frame in enumerate(replay_images):
+                    imageio.imsave(f"{failed_path}/frame_{frame_idx:03d}.png", frame)
+                logging.info(f"Saved failed episode actions and frames to {failed_path}")
 
             # Save a replay video of the episode
             if args.save_video:

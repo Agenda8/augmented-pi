@@ -28,35 +28,44 @@ def action_quant(
 
     if method == "adaptive":
         quant_action_chunk = corki_merge(action_chunk, adaptive_threshold)
+    elif method == "stage_aware":
+        quant_action_chunk = stage_aware_merge(action_chunk, adaptive_threshold, quant_steps)
     elif method == "fixed":
-        if quant_steps <= 1:
-            quant_action_chunk = action_chunk
-
-        n_steps = action_chunk.shape[0]
-
-        # Full groups
-        n_full_steps = (n_steps // quant_steps) * quant_steps
-        if n_full_steps > 0:
-            reshaped = action_chunk[:n_full_steps].reshape(-1, quant_steps, 7)
-            pose_deltas = reshaped[..., :6].sum(axis=1)
-            gripper = reshaped[..., -1, 6:]
-            main_part = np.concatenate([pose_deltas, gripper], axis=-1)
-        else:
-            main_part = np.empty((0, 7), dtype=np.float32)
-
-        # Remainder group
-        if n_full_steps < n_steps:
-            remainder = action_chunk[n_full_steps:]
-            rem_pose = remainder[..., :6].sum(axis=0, keepdims=True)
-            rem_gripper = remainder[-1:, 6:]
-            rem_part = np.concatenate([rem_pose, rem_gripper], axis=-1)
-            quant_action_chunk = np.concatenate([main_part, rem_part], axis=0)
-        else:
-            quant_action_chunk = main_part
+        quant_action_chunk = fixed_step_merge(action_chunk, quant_steps)
 
     return quant_action_chunk
 
+def fixed_step_merge(action_chunk: np.ndarray, quant_steps: int) -> np.ndarray:
+    """
+    Merge actions by fixed steps.
+    For each segment of `quant_steps`, sum pose deltas and keep last gripper.
+    """
+    if quant_steps <= 1:
+        return action_chunk
 
+    n_steps = action_chunk.shape[0]
+
+    # Full groups
+    n_full_steps = (n_steps // quant_steps) * quant_steps
+    if n_full_steps > 0:
+        reshaped = action_chunk[:n_full_steps].reshape(-1, quant_steps, 7)
+        pose_deltas = reshaped[..., :6].sum(axis=1)
+        gripper = reshaped[..., -1, 6:]
+        main_part = np.concatenate([pose_deltas, gripper], axis=-1)
+    else:
+        main_part = np.empty((0, 7), dtype=np.float32)
+
+    # Remainder group
+    if n_full_steps < n_steps:
+        remainder = action_chunk[n_full_steps:]
+        rem_pose = remainder[..., :6].sum(axis=0, keepdims=True)
+        rem_gripper = remainder[-1:, 6:]
+        rem_part = np.concatenate([rem_pose, rem_gripper], axis=-1)
+        quant_action_chunk = np.concatenate([main_part, rem_part], axis=0)
+    else:
+        quant_action_chunk = main_part
+
+    return quant_action_chunk
 
 def get_waypoint_indices(action: np.ndarray, threshold: float) -> np.ndarray:
     """
@@ -147,3 +156,23 @@ def corki_merge(action_chunk: np.ndarray, threshold: float) -> np.ndarray:
         start = end
 
     return np.concatenate(merged, axis=0)
+
+def stage_aware_merge(action_chunk: np.ndarray, translation_threshold: float, quant_steps: int) -> np.ndarray:
+    """
+    Merge the entire action chunk if ALL actions have
+    a translation speed strictly greater than the threshold.
+    If ANY action's speed is <= threshold, return the original chunk unmerged.
+    """
+    if action_chunk.shape[0] == 0:
+        return action_chunk
+        
+    # Calculate the translation speed (L2 norm of the first 3 dimensions)
+    speeds = np.linalg.norm(action_chunk[:, :3], axis=1)
+    z_speeds = action_chunk[:, 2]
+    
+    # If all speeds in the chunk are above the threshold, merge
+    if np.all(speeds > translation_threshold) and np.all(z_speeds > 0):
+        action_chunk = fixed_step_merge(action_chunk, quant_steps=quant_steps)
+    
+    # Otherwise, if even one step is not fast enough, do not merge at all
+    return action_chunk
