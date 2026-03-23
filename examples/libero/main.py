@@ -44,10 +44,11 @@ class Args:
     # Utils
     #################################################################################################################
     save_video: bool = True  # Whether to save videos
+    save_failure: bool = False  # Whether to save failed episode data (actions + frames) for analysis
     video_out_path: str = "data/libero/videos"  # Path to save videos
     results_path: str = "data/libero/eval_results/vanilla.json"  # Path to save final results
     failure_path: str = "data/libero/failure"  # Path to save failed episode data for analysis
-    
+
     seed: int = 7  # Random Seed (for reproducibility)
 
     #################################################################################################################
@@ -247,7 +248,7 @@ def eval_libero(args: Args) -> None:
     if args.results_path:
         # Convert args to dict and filter out unwanted keys
         args_dict = dataclasses.asdict(args)
-        keys_to_exclude = {"host", "port", "save_video", "video_out_path", "results_path"}
+        keys_to_exclude = {"host", "port", "save_video", "video_out_path", "results_path", "failure_path"}
         filtered_args = {k: v for k, v in args_dict.items() if k not in keys_to_exclude}
 
         results = {

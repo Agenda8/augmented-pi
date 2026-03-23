@@ -1,10 +1,13 @@
 import logging
+import pathlib
+import time
 
 import einops
 import flax.nnx as nnx
 import flax.nnx.bridge as nnx_bridge
 import jax
 import jax.numpy as jnp
+import numpy as np
 from typing_extensions import override
 
 from openpi.models import model as _model
@@ -221,6 +224,7 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        #kv_path: str = "/home/jianrd/embodied_AI/openpi/data/libero/kv_cache",
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -235,7 +239,22 @@ class Pi0(_model.BaseModel):
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        '''
+        if kv_path is not None:
+            output_path = pathlib.Path(kv_path)
 
+            def _dump_kv_once(k, v):
+                if output_path.suffix == ".npz":
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path = output_path
+                else:
+                    output_path.mkdir(parents=True, exist_ok=True)
+                    target_path = output_path / f"kv_cache_{int(time.time() * 1000)}.npz"
+                np.savez_compressed(target_path, k=np.asarray(k), v=np.asarray(v))
+
+            # Save once per sample_actions execution, including under jax.jit execution.
+            jax.debug.callback(_dump_kv_once, kv_cache[0], kv_cache[1], ordered=True)
+        '''
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(

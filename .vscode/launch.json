@@ -14,7 +14,7 @@
                 "--port", "8050"
             ],
             "env": {
-                "CUDA_VISIBLE_DEVICES": "3"
+                "CUDA_VISIBLE_DEVICES": "0"
             },
             "cwd": "${workspaceFolder}",
             "stopOnEntry": false,

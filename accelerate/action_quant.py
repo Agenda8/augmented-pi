@@ -171,7 +171,7 @@ def stage_aware_merge(action_chunk: np.ndarray, translation_threshold: float, qu
     z_speeds = action_chunk[:, 2]
     
     # If all speeds in the chunk are above the threshold, merge
-    if np.all(speeds > translation_threshold) and np.all(z_speeds > 0):
+    if np.all(speeds > translation_threshold) and (np.all(z_speeds > 0) or np.all(z_speeds < -0.3)):
         action_chunk = fixed_step_merge(action_chunk, quant_steps=quant_steps)
     
     # Otherwise, if even one step is not fast enough, do not merge at all
