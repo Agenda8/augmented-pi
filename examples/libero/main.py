@@ -17,6 +17,7 @@ import tyro
 
 from accelerate.action_quant import action_quant
 from accelerate.skip_vla import fit_next_action_chunk, should_skip_vla
+from accelerate.action_stage_determine import stage_determine
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -64,6 +65,9 @@ class Args:
     z_xy_rate_skip: float = 0.4  # Skip if max_z / max_xy is below this threshold for the previous chunk
     z_max_skip: float = 0.3  # Skip if max absolute z in the previous chunk is below this threshold
 
+    action_aware_chunk: bool = False  # Whether to use action-aware chunking
+    translation_threshold: float = 0.5  # Threshold for translation speed to determine coarse stage
+    z_threshold: float = 0.1  # Threshold for z speed to determine
 
 def eval_libero(args: Args) -> None:
     # Set random seed
@@ -193,7 +197,9 @@ def eval_libero(args: Args) -> None:
                             assert (
                                 len(action_chunk) >= args.replan_steps
                             ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
-                            action_chunk = action_chunk[: args.replan_steps]
+                            if not (args.action_aware_chunk 
+                                    and stage_determine(action_chunk, args.translation_threshold, args.z_threshold) == "coarse"):
+                                action_chunk = action_chunk[: args.replan_steps]
 
                         action_chunk = np.asarray(action_chunk, dtype=np.float32)
 
