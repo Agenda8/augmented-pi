@@ -16,6 +16,7 @@ import tqdm
 import tyro
 
 from accelerate.action_quant import action_quant
+from accelerate.skip_vla import fit_next_action_chunk, should_skip_vla
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -59,6 +60,10 @@ class Args:
     action_quant_steps: int = 2  # Number of steps to aggregate for "fixed" method
     action_quant_threshold: float = 0.03  # Threshold for "adaptive" method
 
+    vla_skip: bool = False  # Whether to enable chunk-level VLA skipping during evaluation
+    z_xy_rate_skip: float = 0.4  # Skip if max_z / max_xy is below this threshold for the previous chunk
+    z_max_skip: float = 0.3  # Skip if max absolute z in the previous chunk is below this threshold
+
 
 def eval_libero(args: Args) -> None:
     # Set random seed
@@ -76,10 +81,16 @@ def eval_libero(args: Args) -> None:
         max_steps = 220  # longest training demo has 193 steps
     elif args.task_suite_name == "libero_object":
         max_steps = 280  # longest training demo has 254 steps
+        args.z_xy_rate_skip = 0.6
+        args.z_max_skip = 0.5
     elif args.task_suite_name == "libero_goal":
         max_steps = 300  # longest training demo has 270 steps
+        args.z_xy_rate_skip = 1.2
+        args.z_max_skip = 0.3
     elif args.task_suite_name == "libero_10":
         max_steps = 520  # longest training demo has 505 steps
+        args.z_xy_rate_skip = 1.0
+        args.z_max_skip = 0.3
     elif args.task_suite_name == "libero_90":
         max_steps = 400  # longest training demo has 373 steps
     else:
@@ -110,6 +121,8 @@ def eval_libero(args: Args) -> None:
             # Reset environment
             env.reset()
             action_plan = collections.deque()
+            current_chunk_actions = []
+            prev_executed_chunk = None
 
             # Set initial states
             obs = env.set_init_state(initial_states[episode_idx])
@@ -150,28 +163,39 @@ def eval_libero(args: Args) -> None:
                     #imageio.imsave(f"data/libero/frame/vanilla/wrist_img_frame_{t:03d}.png", wrist_img)
 
                     if not action_plan:
-                        # Finished executing previous action chunk -- compute new chunk
-                        # Prepare observations dict
-                        element = {
-                            "observation/image": img,
-                            "observation/wrist_image": wrist_img,
-                            "observation/state": np.concatenate(
-                                (
-                                    obs["robot0_eef_pos"],
-                                    _quat2axisangle(obs["robot0_eef_quat"]),
-                                    obs["robot0_gripper_qpos"],
-                                )
-                            ),
-                            "prompt": str(task_description),
-                        }
-                        # Query model to get action
-                        response = client.infer(element)
-                        episode_infer_count += 1
-                        action_chunk = response["actions"]
-                        assert (
-                            len(action_chunk) >= args.replan_steps
-                        ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
-                        action_chunk = action_chunk[: args.replan_steps]
+                        # Finished executing previous action chunk -- either infer a new chunk
+                        # or skip one VLA call by fitting next chunk from the previous executed chunk.
+                        if args.vla_skip and should_skip_vla(
+                            prev_executed_chunk,
+                            z_xy_rate_skip=args.z_xy_rate_skip,
+                            z_max_skip=args.z_max_skip,
+                        ):
+                            action_chunk = fit_next_action_chunk(prev_executed_chunk)
+                        else:
+                            # Prepare observations dict
+                            element = {
+                                "observation/image": img,
+                                "observation/wrist_image": wrist_img,
+                                "observation/state": np.concatenate(
+                                    (
+                                        obs["robot0_eef_pos"],
+                                        _quat2axisangle(obs["robot0_eef_quat"]),
+                                        obs["robot0_gripper_qpos"],
+                                    )
+                                ),
+                                "prompt": str(task_description),
+                            }
+                            # Query model to get action
+                            response = client.infer(element)
+                            episode_infer_count += 1
+                            action_chunk = np.asarray(response["actions"], dtype=np.float32)
+
+                            assert (
+                                len(action_chunk) >= args.replan_steps
+                            ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
+                            action_chunk = action_chunk[: args.replan_steps]
+
+                        action_chunk = np.asarray(action_chunk, dtype=np.float32)
 
                         if args.action_quant:
                             action_chunk = action_quant(
@@ -181,10 +205,15 @@ def eval_libero(args: Args) -> None:
                                 args.action_quant_threshold,
                             )
 
+                        current_chunk_actions = []
                         action_plan.extend(action_chunk)
 
                     action = action_plan.popleft()
+                    current_chunk_actions.append(np.asarray(action, dtype=np.float32))
                     episode_actions.append(action)
+
+                    if not action_plan and current_chunk_actions:
+                        prev_executed_chunk = np.asarray(current_chunk_actions, dtype=np.float32)
 
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
