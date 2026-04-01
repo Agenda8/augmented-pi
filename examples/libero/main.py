@@ -68,6 +68,8 @@ class Args:
     action_aware_chunk: bool = False  # Whether to use action-aware chunking
     translation_threshold: float = 0.5  # Threshold for translation speed to determine coarse stage
     z_threshold: float = 0.1  # Threshold for z speed to determine
+    fine_chunk_steps: int = 10  # Chunk size used for fine stage when action-aware chunking is enabled
+    coarse_chunk_steps: int = 15  # Chunk size used for coarse stage when action-aware chunking is enabled
 
 def eval_libero(args: Args) -> None:
     # Set random seed
@@ -194,12 +196,22 @@ def eval_libero(args: Args) -> None:
                             episode_infer_count += 1
                             action_chunk = np.asarray(response["actions"], dtype=np.float32)
 
+                            if args.action_aware_chunk:
+                                stage = stage_determine(
+                                    action_chunk,
+                                    args.translation_threshold,
+                                    args.z_threshold,
+                                )
+                                desired_steps = args.coarse_chunk_steps if stage == "coarse" else args.fine_chunk_steps
+                            else:
+                                stage = "fixed"
+                                desired_steps = args.replan_steps
+                            
                             assert (
-                                len(action_chunk) >= args.replan_steps
-                            ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
-                            if not (args.action_aware_chunk 
-                                    and stage_determine(action_chunk, args.translation_threshold, args.z_threshold) == "coarse"):
-                                action_chunk = action_chunk[: args.replan_steps]
+                                len(action_chunk) >= desired_steps
+                            ), f"We want to replan {desired_steps} steps, but policy only predicts {len(action_chunk)} steps."
+
+                            action_chunk = action_chunk[:desired_steps]
 
                         action_chunk = np.asarray(action_chunk, dtype=np.float32)
 
