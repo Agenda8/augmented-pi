@@ -160,6 +160,7 @@ class Pi0(_model.BaseModel):
             ar_mask += [True]
 
         action_tokens = self.action_in_proj(noisy_actions)
+        action_horizon = action_tokens.shape[1]
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
         if self.pi05:
@@ -172,7 +173,7 @@ class Pi0(_model.BaseModel):
             adarms_cond = time_emb
         else:
             # mix timestep + action information using an MLP (no adaRMS)
-            time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
+            time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=action_horizon)
             action_time_tokens = jnp.concatenate([action_tokens, time_tokens], axis=-1)
             action_time_tokens = self.action_time_mlp_in(action_time_tokens)
             action_time_tokens = nnx.swish(action_time_tokens)
@@ -182,7 +183,7 @@ class Pi0(_model.BaseModel):
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
         # image/language/state inputs do not attend to action tokens
-        ar_mask += [True] + ([False] * (self.action_horizon - 1))
+        ar_mask += [True] + ([False] * (action_horizon - 1))
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
@@ -212,7 +213,7 @@ class Pi0(_model.BaseModel):
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
-        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        v_t = self.action_out_proj(suffix_out[:, -actions.shape[1] :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
@@ -223,6 +224,7 @@ class Pi0(_model.BaseModel):
         observation: _model.Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
+        action_horizon: int | None = None,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
         #kv_path: str = "/home/jianrd/embodied_AI/openpi/data/libero/kv_cache",
     ) -> _model.Actions:
@@ -232,7 +234,14 @@ class Pi0(_model.BaseModel):
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
         if noise is None:
-            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+            horizon = self.action_horizon if action_horizon is None else action_horizon
+            noise = jax.random.normal(rng, (batch_size, horizon, self.action_dim))
+        else:
+            horizon = noise.shape[1]
+            if action_horizon is not None and action_horizon != horizon:
+                raise ValueError(
+                    f"action_horizon ({action_horizon}) does not match noise horizon ({horizon})"
+                )
 
         # first fill KV cache with a forward pass of the prefix
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
@@ -285,7 +294,7 @@ class Pi0(_model.BaseModel):
                 adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
-            v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            v_t = self.action_out_proj(suffix_out[:, -horizon:])
 
             return x_t + dt * v_t, time + dt
 

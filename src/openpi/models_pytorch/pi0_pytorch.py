@@ -304,7 +304,7 @@ class PI0Pytorch(nn.Module):
         pad_masks.append(action_time_mask)
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
-        att_masks += [1] + ([0] * (self.config.action_horizon - 1))
+        att_masks += [1] + ([0] * (action_time_dim - 1))
 
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
@@ -361,7 +361,7 @@ class PI0Pytorch(nn.Module):
             forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
         )
 
-        suffix_out = suffix_out[:, -self.config.action_horizon :]
+        suffix_out = suffix_out[:, -actions.shape[1] :]
         suffix_out = suffix_out.to(dtype=torch.float32)
 
         # Apply gradient checkpointing to final action projection if enabled
@@ -373,12 +373,19 @@ class PI0Pytorch(nn.Module):
         return F.mse_loss(u_t, v_t, reduction="none")
 
     @torch.no_grad()
-    def sample_actions(self, device, observation, noise=None, num_steps=10) -> Tensor:
+    def sample_actions(self, device, observation, noise=None, num_steps=10, action_horizon=None) -> Tensor:
         """Do a full inference forward and compute the action (batch_size x num_steps x num_motors)"""
         bsize = observation.state.shape[0]
         if noise is None:
-            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            horizon = self.config.action_horizon if action_horizon is None else action_horizon
+            actions_shape = (bsize, horizon, self.config.action_dim)
             noise = self.sample_noise(actions_shape, device)
+        else:
+            horizon = noise.shape[1]
+            if action_horizon is not None and action_horizon != horizon:
+                raise ValueError(
+                    f"action_horizon ({action_horizon}) does not match noise horizon ({horizon})"
+                )
 
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
 
@@ -456,6 +463,6 @@ class PI0Pytorch(nn.Module):
         )
 
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -self.config.action_horizon :]
+        suffix_out = suffix_out[:, -x_t.shape[1] :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)

@@ -65,7 +65,11 @@ class Policy(BasePolicy):
             self._sample_actions = model.sample_actions
         else:
             # JAX model setup
-            self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            # `action_horizon` changes tensor shapes and must be static for JIT compilation.
+            self._sample_actions = nnx_utils.module_jit(
+                model.sample_actions,
+                static_argnames=("action_horizon", "num_steps"),
+            )
             self._rng = rng or jax.random.key(0)
 
     @override
