@@ -76,6 +76,16 @@ class Policy(BasePolicy):
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
+        request_sample_kwargs = inputs.pop("__sample_kwargs", None)
+        if request_sample_kwargs is not None and not isinstance(request_sample_kwargs, dict):
+            raise ValueError("__sample_kwargs must be a dict when provided")
+
+        allowed_sample_kwargs = {"action_horizon", "num_steps"}
+        if request_sample_kwargs is not None:
+            unexpected = set(request_sample_kwargs) - allowed_sample_kwargs
+            if unexpected:
+                raise ValueError(f"Unsupported sample kwargs in request: {sorted(unexpected)}")
+
         inputs = self._input_transform(inputs)
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
@@ -88,6 +98,8 @@ class Policy(BasePolicy):
 
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
+        if request_sample_kwargs is not None:
+            sample_kwargs.update(request_sample_kwargs)
         if noise is not None:
             noise = torch.from_numpy(noise).to(self._pytorch_device) if self._is_pytorch_model else jnp.asarray(noise)
 

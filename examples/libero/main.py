@@ -178,6 +178,17 @@ def eval_libero(args: Args) -> None:
                         ):
                             action_chunk = fit_next_action_chunk(prev_executed_chunk)
                         else:
+                            stage = "fine"
+                            desired_steps = args.replan_steps
+                            if args.action_aware_chunk:
+                                if prev_executed_chunk is not None and len(prev_executed_chunk) > 0:
+                                    stage = stage_determine(
+                                        prev_executed_chunk,
+                                        args.translation_threshold,
+                                        args.z_threshold,
+                                    )
+                                desired_steps = args.coarse_chunk_steps if stage == "coarse" else args.fine_chunk_steps
+
                             # Prepare observations dict
                             element = {
                                 "observation/image": img,
@@ -191,21 +202,13 @@ def eval_libero(args: Args) -> None:
                                 ),
                                 "prompt": str(task_description),
                             }
+                            # Directly control model inference chunk size per request.
+                            element["__sample_kwargs"] = {"action_horizon": int(desired_steps)}
+
                             # Query model to get action
                             response = client.infer(element)
                             episode_infer_count += 1
                             action_chunk = np.asarray(response["actions"], dtype=np.float32)
-
-                            if args.action_aware_chunk:
-                                stage = stage_determine(
-                                    action_chunk,
-                                    args.translation_threshold,
-                                    args.z_threshold,
-                                )
-                                desired_steps = args.coarse_chunk_steps if stage == "coarse" else args.fine_chunk_steps
-                            else:
-                                stage = "fixed"
-                                desired_steps = args.replan_steps
                             
                             assert (
                                 len(action_chunk) >= desired_steps
