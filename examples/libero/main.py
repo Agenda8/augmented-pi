@@ -202,8 +202,10 @@ def eval_libero(args: Args) -> None:
                                 ),
                                 "prompt": str(task_description),
                             }
-                            # Directly control model inference chunk size per request.
-                            element["__sample_kwargs"] = {"action_horizon": int(desired_steps)}
+                            # Only override model inference chunk size in action-aware mode.
+                            # When disabled, keep original flow: model returns default chunk and we slice locally.
+                            if args.action_aware_chunk:
+                                element["__sample_kwargs"] = {"action_horizon": int(desired_steps)}
 
                             # Query model to get action
                             response = client.infer(element)
