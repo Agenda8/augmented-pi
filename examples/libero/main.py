@@ -47,8 +47,12 @@ class Args:
     #################################################################################################################
     save_video: bool = True  # Whether to save videos
     save_failure: bool = False  # Whether to save failed episode data (actions + frames) for analysis
+    save_frame: bool = False  # Whether to save per-episode frame images
+    save_actions: bool = False  # Whether to save per-episode actions
     video_out_path: str = "data/libero/videos"  # Path to save videos
     results_path: str = "data/libero/eval_results/vanilla.json"  # Path to save final results
+    frame_out_path: str = "data/libero/frame"  # Path to save per-episode frame images
+    actions_out_path: str = "data/libero/actions"  # Path to save per-episode actions
     failure_path: str = "data/libero/failure"  # Path to save failed episode data for analysis
 
     seed: int = 7  # Random Seed (for reproducibility)
@@ -139,6 +143,12 @@ def eval_libero(args: Args) -> None:
             replay_images = []
             episode_actions = []
             episode_infer_count = 0
+            episode_global_idx = total_episodes + 1
+
+            frame_episode_dir = None
+            if args.save_frame:
+                frame_episode_dir = pathlib.Path(args.frame_out_path) / f"episode_{episode_global_idx:05d}"
+                frame_episode_dir.mkdir(parents=True, exist_ok=True)
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -164,9 +174,9 @@ def eval_libero(args: Args) -> None:
                     # Save preprocessed image for replay video
                     replay_images.append(img)
 
-                    # save frame image
-                    #imageio.imsave(f"data/libero/frame/vanilla/img_frame_{t:03d}.png", img)
-                    #imageio.imsave(f"data/libero/frame/vanilla/wrist_img_frame_{t:03d}.png", wrist_img)
+                    if args.save_frame and frame_episode_dir is not None:
+                        imageio.imsave(frame_episode_dir / f"img_frame_{t:03d}.png", img)
+                        imageio.imsave(frame_episode_dir / f"wrist_img_frame_{t:03d}.png", wrist_img)
 
                     if not action_plan:
                         # Finished executing previous action chunk -- either infer a new chunk
@@ -255,10 +265,13 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save actions
-            #action_save_path = pathlib.Path(args.video_out_path) / f"actions.npy"
-            #np.save(action_save_path, np.array(episode_actions))
-            #logging.info(f"Saved actions to {action_save_path}")
+            if args.save_actions:
+                actions_dir = pathlib.Path(args.actions_out_path)
+                actions_dir.mkdir(parents=True, exist_ok=True)
+                action_save_path = actions_dir / f"episode_{total_episodes:05d}.npy"
+                np.save(action_save_path, np.asarray(episode_actions, dtype=np.float32))
+                logging.info(f"Saved actions to {action_save_path}")
+
             # Failure analysis
             if not done:
                 failed_path = pathlib.Path(args.failure_path) / f"episode_{total_episodes}"
@@ -300,7 +313,18 @@ def eval_libero(args: Args) -> None:
     if args.results_path:
         # Convert args to dict and filter out unwanted keys
         args_dict = dataclasses.asdict(args)
-        keys_to_exclude = {"host", "port", "save_video", "video_out_path", "results_path", "failure_path"}
+        keys_to_exclude = {
+            "host",
+            "port",
+            "save_video",
+            "video_out_path",
+            "save_frame",
+            "frame_out_path",
+            "save_actions",
+            "actions_out_path",
+            "results_path",
+            "failure_path",
+        }
         filtered_args = {k: v for k, v in args_dict.items() if k not in keys_to_exclude}
 
         results = {
