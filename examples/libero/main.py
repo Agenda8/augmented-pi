@@ -45,7 +45,7 @@ class Args:
     #################################################################################################################
     # Utils
     #################################################################################################################
-    save_video: bool = True  # Whether to save videos
+    save_video: bool = False  # Whether to save videos
     save_failure: bool = False  # Whether to save failed episode data (actions + frames) for analysis
     save_frame: bool = False  # Whether to save per-episode frame images
     save_actions: bool = False  # Whether to save per-episode actions
@@ -141,6 +141,7 @@ def eval_libero(args: Args) -> None:
             t = 0
             done = False
             replay_images = []
+            replay_wrist_images = []
             episode_actions = []
             episode_infer_count = 0
             episode_global_idx = total_episodes + 1
@@ -173,6 +174,7 @@ def eval_libero(args: Args) -> None:
 
                     # Save preprocessed image for replay video
                     replay_images.append(img)
+                    replay_wrist_images.append(wrist_img)
 
                     if args.save_frame and frame_episode_dir is not None:
                         imageio.imsave(frame_episode_dir / f"img_frame_{t:03d}.png", img)
@@ -273,13 +275,21 @@ def eval_libero(args: Args) -> None:
                 logging.info(f"Saved actions to {action_save_path}")
 
             # Failure analysis
-            if not done:
+            if args.save_failure and not done:
                 failed_path = pathlib.Path(args.failure_path) / f"episode_{total_episodes}"
                 failed_path.mkdir(parents=True, exist_ok=True)
-                np.save(failed_path / "actions.npy", np.array(episode_actions))
+                frames_dir = failed_path / "frames"
+                wrist_frames_dir = failed_path / "wrist_frames"
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                wrist_frames_dir.mkdir(parents=True, exist_ok=True)
+
+                np.save(failed_path / "actions.npy", np.asarray(episode_actions, dtype=np.float32))
+
                 for frame_idx, frame in enumerate(replay_images):
-                    imageio.imsave(f"{failed_path}/frame_{frame_idx:03d}.png", frame)
-                logging.info(f"Saved failed episode actions and frames to {failed_path}")
+                    imageio.imsave(frames_dir / f"frame_{frame_idx:03d}.png", frame)
+
+                for frame_idx, wrist_frame in enumerate(replay_wrist_images):
+                    imageio.imsave(wrist_frames_dir / f"wrist_frame_{frame_idx:03d}.png", wrist_frame)
 
             # Save a replay video of the episode
             if args.save_video:
