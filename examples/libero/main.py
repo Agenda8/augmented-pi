@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import pathlib
+from typing import Optional
 
 import imageio
 from libero.libero import benchmark
@@ -39,6 +40,7 @@ class Args:
     task_suite_name: str = (
         "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
+    task_id: Optional[int] = None  # Specific task ID to evaluate
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
 
@@ -91,16 +93,10 @@ def eval_libero(args: Args) -> None:
         max_steps = 220  # longest training demo has 193 steps
     elif args.task_suite_name == "libero_object":
         max_steps = 280  # longest training demo has 254 steps
-        args.z_xy_rate_skip = 0.6
-        args.z_max_skip = 0.5
     elif args.task_suite_name == "libero_goal":
         max_steps = 300  # longest training demo has 270 steps
-        args.z_xy_rate_skip = 1.2
-        args.z_max_skip = 0.3
     elif args.task_suite_name == "libero_10":
         max_steps = 520  # longest training demo has 505 steps
-        args.z_xy_rate_skip = 1.0
-        args.z_max_skip = 0.3
     elif args.task_suite_name == "libero_90":
         max_steps = 400  # longest training demo has 373 steps
     else:
@@ -113,7 +109,15 @@ def eval_libero(args: Args) -> None:
     success_episode_steps = []
     infer_counts_per_success = []
 
-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+    if args.task_id is None:
+        task_ids = range(num_tasks_in_suite)
+    else:
+        if not 0 <= args.task_id < num_tasks_in_suite:
+            raise ValueError(f"task_id must be in [0, {num_tasks_in_suite - 1}], got {args.task_id}")
+        task_ids = [args.task_id]
+        logging.info(f"Evaluating only task_id={args.task_id} in suite {args.task_suite_name}")
+
+    for task_id in tqdm.tqdm(task_ids):
         # Get task
         task = task_suite.get_task(task_id)
 
@@ -326,6 +330,7 @@ def eval_libero(args: Args) -> None:
         keys_to_exclude = {
             "host",
             "port",
+            "save_failure",
             "save_video",
             "video_out_path",
             "save_frame",
