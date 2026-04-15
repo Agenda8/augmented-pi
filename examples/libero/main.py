@@ -50,10 +50,12 @@ class Args:
     save_video: bool = False  # Whether to save videos
     save_failure: bool = False  # Whether to save failed episode data (actions + frames) for analysis
     save_frame: bool = False  # Whether to save per-episode frame images
+    save_depth: bool = False  # Whether to save per-episode depth maps (raw + visualization)
     save_actions: bool = False  # Whether to save per-episode actions
     video_out_path: str = "data/libero/videos"  # Path to save videos
     results_path: str = "data/libero/eval_results/vanilla.json"  # Path to save final results
     frame_out_path: str = "data/libero/frame"  # Path to save per-episode frame images
+    depth_out_path: str = "data/libero/depth"  # Path to save per-episode depth maps
     actions_out_path: str = "data/libero/actions"  # Path to save per-episode actions
     failure_path: str = "data/libero/failure"  # Path to save failed episode data for analysis
 
@@ -125,7 +127,7 @@ def eval_libero(args: Args) -> None:
         initial_states = task_suite.get_task_init_states(task_id)
 
         # Initialize LIBERO environment and task description
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed, enable_depth=args.save_depth)
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -146,14 +148,33 @@ def eval_libero(args: Args) -> None:
             done = False
             replay_images = []
             replay_wrist_images = []
+            replay_depths = []
+            replay_wrist_depths = []
             episode_actions = []
             episode_infer_count = 0
             episode_global_idx = total_episodes + 1
 
             frame_episode_dir = None
+            frame_agent_dir = None
+            frame_wrist_dir = None
             if args.save_frame:
                 frame_episode_dir = pathlib.Path(args.frame_out_path) / f"episode_{episode_global_idx:05d}"
                 frame_episode_dir.mkdir(parents=True, exist_ok=True)
+                frame_agent_dir = frame_episode_dir / "frames"
+                frame_wrist_dir = frame_episode_dir / "wrist_frames"
+                frame_agent_dir.mkdir(parents=True, exist_ok=True)
+                frame_wrist_dir.mkdir(parents=True, exist_ok=True)
+
+            depth_episode_dir = None
+            depth_agent_vis_dir = None
+            depth_wrist_vis_dir = None
+            if args.save_depth:
+                depth_episode_dir = pathlib.Path(args.depth_out_path) / f"episode_{episode_global_idx:05d}"
+                depth_episode_dir.mkdir(parents=True, exist_ok=True)
+                depth_agent_vis_dir = depth_episode_dir / "depth_vis"
+                depth_wrist_vis_dir = depth_episode_dir / "wrist_depth_vis"
+                depth_agent_vis_dir.mkdir(parents=True, exist_ok=True)
+                depth_wrist_vis_dir.mkdir(parents=True, exist_ok=True)
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -176,13 +197,30 @@ def eval_libero(args: Args) -> None:
                         image_tools.resize_with_pad(wrist_img, args.resize_size, args.resize_size)
                     )
 
+                    depth = _get_depth_observation(obs, "agentview_depth")
+                    wrist_depth = _get_depth_observation(obs, "robot0_eye_in_hand_depth")
+                    if depth is not None:
+                        depth = np.ascontiguousarray(depth[::-1, ::-1]).astype(np.float32)
+                    if wrist_depth is not None:
+                        wrist_depth = np.ascontiguousarray(wrist_depth[::-1, ::-1]).astype(np.float32)
+
                     # Save preprocessed image for replay video
                     replay_images.append(img)
                     replay_wrist_images.append(wrist_img)
+                    if depth is not None:
+                        replay_depths.append(depth)
+                    if wrist_depth is not None:
+                        replay_wrist_depths.append(wrist_depth)
 
-                    if args.save_frame and frame_episode_dir is not None:
-                        imageio.imsave(frame_episode_dir / f"img_frame_{t:03d}.png", img)
-                        imageio.imsave(frame_episode_dir / f"wrist_img_frame_{t:03d}.png", wrist_img)
+                    if args.save_frame and frame_agent_dir is not None and frame_wrist_dir is not None:
+                        imageio.imsave(frame_agent_dir / f"frame_{t:03d}.png", img)
+                        imageio.imsave(frame_wrist_dir / f"wrist_frame_{t:03d}.png", wrist_img)
+
+                    if args.save_depth and depth_agent_vis_dir is not None and depth_wrist_vis_dir is not None:
+                        if depth is not None:
+                            imageio.imsave(depth_agent_vis_dir / f"depth_{t:03d}.png", _depth_to_vis(depth))
+                        if wrist_depth is not None:
+                            imageio.imsave(depth_wrist_vis_dir / f"wrist_depth_{t:03d}.png", _depth_to_vis(wrist_depth))
 
                     if not action_plan:
                         # Finished executing previous action chunk -- either infer a new chunk
@@ -278,6 +316,12 @@ def eval_libero(args: Args) -> None:
                 np.save(action_save_path, np.asarray(episode_actions, dtype=np.float32))
                 logging.info(f"Saved actions to {action_save_path}")
 
+            if args.save_depth and depth_episode_dir is not None:
+                if replay_depths:
+                    np.save(depth_episode_dir / "depth.npy", np.asarray(replay_depths, dtype=np.float32))
+                if replay_wrist_depths:
+                    np.save(depth_episode_dir / "wrist_depth.npy", np.asarray(replay_wrist_depths, dtype=np.float32))
+
             # Failure analysis
             if args.save_failure and not done:
                 failed_path = pathlib.Path(args.failure_path) / f"episode_{total_episodes}"
@@ -287,6 +331,12 @@ def eval_libero(args: Args) -> None:
                 frames_dir.mkdir(parents=True, exist_ok=True)
                 wrist_frames_dir.mkdir(parents=True, exist_ok=True)
 
+                if args.save_depth:
+                    depth_dir = failed_path / "depth"
+                    wrist_depth_dir = failed_path / "wrist_depth"
+                    depth_dir.mkdir(parents=True, exist_ok=True)
+                    wrist_depth_dir.mkdir(parents=True, exist_ok=True)
+
                 np.save(failed_path / "actions.npy", np.asarray(episode_actions, dtype=np.float32))
 
                 for frame_idx, frame in enumerate(replay_images):
@@ -294,6 +344,19 @@ def eval_libero(args: Args) -> None:
 
                 for frame_idx, wrist_frame in enumerate(replay_wrist_images):
                     imageio.imsave(wrist_frames_dir / f"wrist_frame_{frame_idx:03d}.png", wrist_frame)
+
+                if args.save_depth:
+                    if replay_depths:
+                        np.save(failed_path / "depth.npy", np.asarray(replay_depths, dtype=np.float32))
+                        for frame_idx, depth_frame in enumerate(replay_depths):
+                            imageio.imsave(depth_dir / f"depth_{frame_idx:03d}.png", _depth_to_vis(depth_frame))
+                    if replay_wrist_depths:
+                        np.save(failed_path / "wrist_depth.npy", np.asarray(replay_wrist_depths, dtype=np.float32))
+                        for frame_idx, depth_frame in enumerate(replay_wrist_depths):
+                            imageio.imsave(
+                                wrist_depth_dir / f"wrist_depth_{frame_idx:03d}.png",
+                                _depth_to_vis(depth_frame),
+                            )
 
             # Save a replay video of the episode
             if args.save_video:
@@ -335,6 +398,8 @@ def eval_libero(args: Args) -> None:
             "video_out_path",
             "save_frame",
             "frame_out_path",
+            "save_depth",
+            "depth_out_path",
             "save_actions",
             "actions_out_path",
             "results_path",
@@ -356,14 +421,48 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Results saved to {args.results_path}")
 
 
-def _get_libero_env(task, resolution, seed):
+def _get_libero_env(task, resolution, seed, enable_depth=False):
     """Initializes and returns the LIBERO environment, along with the task description."""
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
-    env_args = {"bddl_file_name": task_bddl_file, "camera_heights": resolution, "camera_widths": resolution}
+    env_args = {
+        "bddl_file_name": task_bddl_file,
+        "camera_heights": resolution,
+        "camera_widths": resolution,
+        "camera_depths": enable_depth,
+    }
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
+
+
+def _get_depth_observation(obs: dict, key: str) -> Optional[np.ndarray]:
+    value = obs.get(key)
+    if value is None:
+        return None
+    return np.asarray(value)
+
+
+def _depth_to_vis(depth: np.ndarray) -> np.ndarray:
+    depth = np.asarray(depth, dtype=np.float32)
+    if depth.ndim == 3 and depth.shape[-1] == 1:
+        depth = depth[..., 0]
+    elif depth.ndim == 3:
+        depth = depth[..., 0]
+
+    finite = np.isfinite(depth)
+    if not np.any(finite):
+        return np.zeros((depth.shape[0], depth.shape[1], 3), dtype=np.uint8)
+
+    valid = depth[finite]
+    lo = np.percentile(valid, 1.0)
+    hi = np.percentile(valid, 99.0)
+    if hi <= lo:
+        hi = lo + 1e-6
+
+    normalized = np.clip((depth - lo) / (hi - lo), 0.0, 1.0)
+    gray = (normalized * 255).astype(np.uint8)
+    return np.repeat(gray[..., None], 3, axis=-1)
 
 
 def _quat2axisangle(quat):
