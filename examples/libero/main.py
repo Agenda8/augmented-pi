@@ -1,10 +1,11 @@
 import collections
+import csv
 import dataclasses
 import json
 import logging
 import math
 import pathlib
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import imageio
 from libero.libero import benchmark
@@ -16,6 +17,7 @@ from openpi_client import websocket_client_policy as _websocket_client_policy
 import tqdm
 import tyro
 
+from augmented.depth_guided_align import DepthFrameAnalysis, DepthGuidedAlignConfig, DepthGuidedAligner
 from accelerate.action_quant import action_quant
 from accelerate.skip_vla import fit_next_action_chunk, should_skip_vla
 from accelerate.action_stage_determine import stage_determine
@@ -41,6 +43,7 @@ class Args:
         "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     task_id: Optional[int] = None  # Specific task ID to evaluate
+    fixed_initial_state_idx: Optional[int] = None  # Use this init state index for every trial when set
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
 
@@ -79,6 +82,15 @@ class Args:
     fine_chunk_steps: int = 10  # Chunk size used for fine stage when action-aware chunking is enabled
     coarse_chunk_steps: int = 15  # Chunk size used for coarse stage when action-aware chunking is enabled
 
+    #################################################################################################################
+    # Depth-guided fine alignment parameters
+    #################################################################################################################
+    enable_depth_align: bool = False  # Use depth heuristic to align before gripper close
+    depth_align_once_per_episode: bool = True  # Trigger at most once for each episode
+
+    save_depth_align_trace: bool = False  # Save per-frame detection overlays and alignment state/events during eval
+    depth_align_trace_out_path: str = "data/libero/depth_align_trace"  # Output directory for depth-align traces
+
 def eval_libero(args: Args) -> None:
     # Set random seed
     np.random.seed(args.seed)
@@ -105,6 +117,9 @@ def eval_libero(args: Args) -> None:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
+    
+    depth_align_config = _build_depth_align_config(args)
+    depth_aligner = DepthGuidedAligner(depth_align_config) if depth_align_config.enabled else None
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
@@ -126,8 +141,24 @@ def eval_libero(args: Args) -> None:
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
 
+        if args.fixed_initial_state_idx is not None:
+            if not 0 <= args.fixed_initial_state_idx < len(initial_states):
+                raise ValueError(
+                    f"fixed_initial_state_idx must be in [0, {len(initial_states) - 1}], got {args.fixed_initial_state_idx}"
+                )
+        elif args.num_trials_per_task > len(initial_states):
+            raise ValueError(
+                f"num_trials_per_task={args.num_trials_per_task} exceeds available initial states ({len(initial_states)}). "
+                "Set a smaller num_trials_per_task or set fixed_initial_state_idx."
+            )
+
         # Initialize LIBERO environment and task description
-        env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed, enable_depth=args.save_depth)
+        env, task_description = _get_libero_env(
+            task,
+            LIBERO_ENV_RESOLUTION,
+            args.seed,
+            enable_depth=args.save_depth or args.enable_depth_align,
+        )
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -139,9 +170,12 @@ def eval_libero(args: Args) -> None:
             action_plan = collections.deque()
             current_chunk_actions = []
             prev_executed_chunk = None
+            if depth_aligner is not None:
+                depth_aligner.reset_episode()
 
             # Set initial states
-            obs = env.set_init_state(initial_states[episode_idx])
+            init_state_idx = args.fixed_initial_state_idx if args.fixed_initial_state_idx is not None else episode_idx
+            obs = env.set_init_state(initial_states[init_state_idx])
 
             # Setup
             t = 0
@@ -158,7 +192,7 @@ def eval_libero(args: Args) -> None:
             frame_agent_dir = None
             frame_wrist_dir = None
             if args.save_frame:
-                frame_episode_dir = pathlib.Path(args.frame_out_path) / f"episode_{episode_global_idx:05d}"
+                frame_episode_dir = pathlib.Path(args.frame_out_path) / f"episode_{episode_global_idx:03d}"
                 frame_episode_dir.mkdir(parents=True, exist_ok=True)
                 frame_agent_dir = frame_episode_dir / "frames"
                 frame_wrist_dir = frame_episode_dir / "wrist_frames"
@@ -169,12 +203,23 @@ def eval_libero(args: Args) -> None:
             depth_agent_vis_dir = None
             depth_wrist_vis_dir = None
             if args.save_depth:
-                depth_episode_dir = pathlib.Path(args.depth_out_path) / f"episode_{episode_global_idx:05d}"
+                depth_episode_dir = pathlib.Path(args.depth_out_path) / f"episode_{episode_global_idx:03d}"
                 depth_episode_dir.mkdir(parents=True, exist_ok=True)
                 depth_agent_vis_dir = depth_episode_dir / "depth_vis"
                 depth_wrist_vis_dir = depth_episode_dir / "wrist_depth_vis"
                 depth_agent_vis_dir.mkdir(parents=True, exist_ok=True)
                 depth_wrist_vis_dir.mkdir(parents=True, exist_ok=True)
+
+            depth_align_trace_episode_dir = None
+            depth_align_trace_frames_dir = None
+            depth_align_trace_rows = []
+            depth_align_events = []
+            if args.save_depth_align_trace and depth_aligner is not None:
+                depth_align_trace_episode_dir = (
+                    pathlib.Path(args.depth_align_trace_out_path)
+                )
+                depth_align_trace_frames_dir = depth_align_trace_episode_dir / "frames"
+                depth_align_trace_frames_dir.mkdir(parents=True, exist_ok=True)
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -222,7 +267,75 @@ def eval_libero(args: Args) -> None:
                         if wrist_depth is not None:
                             imageio.imsave(depth_wrist_vis_dir / f"wrist_depth_{t:03d}.png", _depth_to_vis(wrist_depth))
 
-                    if not action_plan:
+                    align_analysis = None
+                    align_event = None
+                    align_mode = None
+                    override_action = None
+                    if depth_aligner is not None:
+                        align_depth = wrist_depth
+                        align_analysis = depth_aligner.analyze_depth_frame(
+                            align_depth,
+                            include_mask=args.save_depth_align_trace,
+                        )
+                        override_action, align_event = depth_aligner.get_control_action(align_depth)
+                        align_mode = depth_aligner.get_mode()
+                        if align_event:
+                            logging.info(
+                                "[DepthAlign] %s (task_id=%d episode=%d t=%d)",
+                                align_event,
+                                task_id,
+                                episode_idx + 1,
+                                t,
+                            )
+                            if args.save_depth_align_trace:
+                                depth_align_events.append(
+                                    {
+                                        "t": int(t),
+                                        "event": align_event,
+                                        "mode": align_mode,
+                                    }
+                                )
+
+                        if args.save_depth_align_trace and depth_align_trace_frames_dir is not None and align_analysis is not None:
+                            source_shape = align_depth.shape[:2] if align_depth is not None else wrist_img.shape[:2]
+                            overlay_img = _render_depth_align_overlay(
+                                wrist_img,
+                                align_analysis,
+                                source_shape=source_shape,
+                                align_mode=align_mode,
+                                align_event=align_event,
+                            )
+                            imageio.imsave(depth_align_trace_frames_dir / f"frame_{t:03d}.png", overlay_img)
+
+                            is_aligned_now = bool(align_analysis.is_aligned)
+                            depth_align_trace_rows.append(
+                                {
+                                    "t": int(t),
+                                    "mode": align_mode,
+                                    "override_action": int(override_action is not None),
+                                    "target_found": int(align_analysis.target_found),
+                                    "should_trigger": int(align_analysis.should_trigger),
+                                    "is_aligned_now": int(is_aligned_now),
+                                    "target_x": align_analysis.target_cx,
+                                    "target_y": align_analysis.target_cy,
+                                    "anchor_x": align_analysis.target_anchor[0],
+                                    "anchor_y": align_analysis.target_anchor[1],
+                                    "center_dist": align_analysis.center_dist,
+                                    "target_depth": align_analysis.target_depth,
+                                    "depth_error": align_analysis.depth_error,
+                                    "depth_gap_abs": align_analysis.depth_gap_abs,
+                                    "pixel_count": align_analysis.pixel_count,
+                                    "event": align_event,
+                                }
+                            )
+
+                        if override_action is not None:
+                            # Override any pending plan while the depth-based controller is active.
+                            action_plan.clear()
+                            current_chunk_actions = []
+                            prev_executed_chunk = None
+
+                    if override_action is None and not action_plan:
                         # Finished executing previous action chunk -- either infer a new chunk
                         # or skip one VLA call by fitting next chunk from the previous executed chunk.
                         if args.vla_skip and should_skip_vla(
@@ -285,8 +398,12 @@ def eval_libero(args: Args) -> None:
                         current_chunk_actions = []
                         action_plan.extend(action_chunk)
 
-                    action = action_plan.popleft()
-                    current_chunk_actions.append(np.asarray(action, dtype=np.float32))
+                    if override_action is not None:
+                        action = np.asarray(override_action, dtype=np.float32)
+                    else:
+                        action = action_plan.popleft()
+                        current_chunk_actions.append(np.asarray(action, dtype=np.float32))
+
                     episode_actions.append(action)
 
                     if not action_plan and current_chunk_actions:
@@ -309,10 +426,20 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
+            if args.save_depth_align_trace and depth_align_trace_episode_dir is not None:
+                _save_depth_align_trace(
+                    depth_align_trace_episode_dir,
+                    depth_align_trace_rows,
+                    depth_align_events,
+                    task_id=task_id,
+                    episode_idx=episode_idx,
+                    initial_state_idx=init_state_idx,
+                )
+
             if args.save_actions:
                 actions_dir = pathlib.Path(args.actions_out_path)
                 actions_dir.mkdir(parents=True, exist_ok=True)
-                action_save_path = actions_dir / f"episode_{total_episodes:05d}.npy"
+                action_save_path = actions_dir / f"episode_{total_episodes:03d}.npy"
                 np.save(action_save_path, np.asarray(episode_actions, dtype=np.float32))
                 logging.info(f"Saved actions to {action_save_path}")
 
@@ -324,7 +451,7 @@ def eval_libero(args: Args) -> None:
 
             # Failure analysis
             if args.save_failure and not done:
-                failed_path = pathlib.Path(args.failure_path) / f"episode_{total_episodes}"
+                failed_path = pathlib.Path(args.failure_path) / f"episode_{total_episodes:03d}"
                 failed_path.mkdir(parents=True, exist_ok=True)
                 frames_dir = failed_path / "frames"
                 wrist_frames_dir = failed_path / "wrist_frames"
@@ -402,6 +529,8 @@ def eval_libero(args: Args) -> None:
             "depth_out_path",
             "save_actions",
             "actions_out_path",
+            "save_depth_align_trace",
+            "depth_align_trace_out_path",
             "results_path",
             "failure_path",
         }
@@ -421,6 +550,143 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Results saved to {args.results_path}")
 
 
+def _resize_mask_nearest(mask: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
+    if mask.shape == (out_h, out_w):
+        return mask
+    y_idx = np.clip(np.round(np.linspace(0, mask.shape[0] - 1, out_h)).astype(np.int32), 0, mask.shape[0] - 1)
+    x_idx = np.clip(np.round(np.linspace(0, mask.shape[1] - 1, out_w)).astype(np.int32), 0, mask.shape[1] - 1)
+    return mask[np.ix_(y_idx, x_idx)]
+
+
+def _blend_mask(image: np.ndarray, mask: np.ndarray, color: Tuple[int, int, int], alpha: float) -> None:
+    if not np.any(mask):
+        return
+    color_arr = np.asarray(color, dtype=np.float32)
+    blended = image[mask].astype(np.float32) * (1.0 - alpha) + color_arr * alpha
+    image[mask] = blended.astype(np.uint8)
+
+
+def _draw_cross(image: np.ndarray, x: float, y: float, color: Tuple[int, int, int], size: int = 4) -> None:
+    h, w = image.shape[:2]
+    cx = int(round(x))
+    cy = int(round(y))
+    if not (0 <= cx < w and 0 <= cy < h):
+        return
+    for dx in range(-size, size + 1):
+        xx = cx + dx
+        if 0 <= xx < w:
+            image[cy, xx] = color
+    for dy in range(-size, size + 1):
+        yy = cy + dy
+        if 0 <= yy < h:
+            image[yy, cx] = color
+
+
+def _render_depth_align_overlay(
+    wrist_img: np.ndarray,
+    analysis: DepthFrameAnalysis,
+    source_shape: Tuple[int, int],
+    align_mode: Optional[str],
+    align_event: Optional[str],
+) -> np.ndarray:
+    overlay = np.asarray(wrist_img, dtype=np.uint8).copy()
+    if overlay.ndim == 2:
+        overlay = np.repeat(overlay[..., None], 3, axis=-1)
+
+    out_h, out_w = overlay.shape[:2]
+    src_h, src_w = source_shape
+
+    if analysis.gripper_mask is not None:
+        gripper_mask = _resize_mask_nearest(analysis.gripper_mask, out_h, out_w)
+        _blend_mask(overlay, gripper_mask, color=(0, 0, 255), alpha=0.25)
+
+    if analysis.near_mask is not None:
+        near_mask = _resize_mask_nearest(analysis.near_mask, out_h, out_w)
+        _blend_mask(overlay, near_mask, color=(255, 0, 0), alpha=0.35)
+
+    sx = out_w / max(float(src_w), 1.0)
+    sy = out_h / max(float(src_h), 1.0)
+
+    anchor_x = analysis.target_anchor[0] * sx
+    anchor_y = analysis.target_anchor[1] * sy
+    _draw_cross(overlay, anchor_x, anchor_y, color=(0, 255, 255), size=5)
+
+    if analysis.target_cx is not None and analysis.target_cy is not None:
+        target_x = analysis.target_cx * sx
+        target_y = analysis.target_cy * sy
+        _draw_cross(overlay, target_x, target_y, color=(255, 0, 0), size=4)
+
+    if align_event:
+        if "triggered" in align_event:
+            event_color = (255, 255, 0)
+        elif "done" in align_event:
+            event_color = (0, 255, 0)
+        elif "timed out" in align_event:
+            event_color = (255, 0, 255)
+        else:
+            event_color = (255, 255, 255)
+        overlay[0:10, 0:40] = event_color
+    elif align_mode == "align":
+        overlay[0:10, 0:40] = (255, 165, 0)
+    elif align_mode == "close":
+        overlay[0:10, 0:40] = (0, 255, 0)
+
+    return overlay
+
+
+def _save_depth_align_trace(
+    trace_episode_dir: pathlib.Path,
+    frame_rows: List[Dict[str, Any]],
+    events: List[Dict[str, Any]],
+    task_id: int,
+    episode_idx: int,
+    initial_state_idx: int,
+) -> None:
+    trace_episode_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = trace_episode_dir / "frame_metrics.csv"
+    fieldnames = [
+        "t",
+        "mode",
+        "override_action",
+        "target_found",
+        "should_trigger",
+        "is_aligned_now",
+        "target_x",
+        "target_y",
+        "anchor_x",
+        "anchor_y",
+        "center_dist",
+        "target_depth",
+        "depth_error",
+        "depth_gap_abs",
+        "pixel_count",
+        "event",
+    ]
+    with csv_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in frame_rows:
+            writer.writerow(row)
+
+    first_trigger_t = next((e["t"] for e in events if "triggered" in e.get("event", "")), None)
+    first_aligned_t = next((e["t"] for e in events if "done" in e.get("event", "")), None)
+
+    summary = {
+        "task_id": task_id,
+        "episode_idx": episode_idx,
+        "initial_state_idx": initial_state_idx,
+        "frames_logged": len(frame_rows),
+        "events_logged": len(events),
+        "first_trigger_t": first_trigger_t,
+        "first_aligned_t": first_aligned_t,
+        "events": events,
+        "csv_path": str(csv_path),
+    }
+    with (trace_episode_dir / "summary.json").open("w") as f:
+        json.dump(summary, f, indent=2)
+
+
 def _get_libero_env(task, resolution, seed, enable_depth=False):
     """Initializes and returns the LIBERO environment, along with the task description."""
     task_description = task.language
@@ -434,6 +700,13 @@ def _get_libero_env(task, resolution, seed, enable_depth=False):
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
+
+
+def _build_depth_align_config(args: Args) -> DepthGuidedAlignConfig:
+    return DepthGuidedAlignConfig(
+        enabled=args.enable_depth_align,
+        once_per_episode=args.depth_align_once_per_episode,
+    )
 
 
 def _get_depth_observation(obs: dict, key: str) -> Optional[np.ndarray]:
