@@ -131,6 +131,8 @@ def main(args: Args) -> None:
                 "pixel_count": int(analysis.pixel_count),
                 "target_x": None if analysis.target_cx is None else float(analysis.target_cx),
                 "target_y": None if analysis.target_cy is None else float(analysis.target_cy),
+                "x_error": None if analysis.x_error is None else float(analysis.x_error),
+                "y_error": None if analysis.y_error is None else float(analysis.y_error),
                 "anchor_x": float(analysis.target_anchor[0]),
                 "anchor_y": float(analysis.target_anchor[1]),
                 "center_dist": None if analysis.center_dist is None else float(analysis.center_dist),
@@ -170,6 +172,8 @@ def main(args: Args) -> None:
                 "pixel_count",
                 "target_x",
                 "target_y",
+                "x_error",
+                "y_error",
                 "anchor_x",
                 "anchor_y",
                 "center_dist",
@@ -183,6 +187,8 @@ def main(args: Args) -> None:
             writer.writerow(row)
 
     dists = [r["center_dist"] for r in rows if r["center_dist"] is not None]
+    x_errors = [r["x_error"] for r in rows if r["x_error"] is not None]
+    y_errors = [r["y_error"] for r in rows if r["y_error"] is not None]
     depth_gap_abs_vals = [r["depth_gap_abs"] for r in rows if r["depth_gap_abs"] is not None]
     depth_error_vals = [r["depth_error"] for r in rows if r["depth_error"] is not None]
 
@@ -193,6 +199,10 @@ def main(args: Args) -> None:
         "trigger_ratio": (trigger_count / len(rows)) if rows else 0.0,
         "center_dist_mean": float(np.mean(dists)) if dists else None,
         "center_dist_std": float(np.std(dists)) if dists else None,
+        "x_error_mean": float(np.mean(x_errors)) if x_errors else None,
+        "x_error_std": float(np.std(x_errors)) if x_errors else None,
+        "y_error_mean": float(np.mean(y_errors)) if y_errors else None,
+        "y_error_std": float(np.std(y_errors)) if y_errors else None,
         "depth_gap_abs_mean": float(np.mean(depth_gap_abs_vals)) if depth_gap_abs_vals else None,
         "depth_gap_abs_std": float(np.std(depth_gap_abs_vals)) if depth_gap_abs_vals else None,
         "depth_error_mean": float(np.mean(depth_error_vals)) if depth_error_vals else None,

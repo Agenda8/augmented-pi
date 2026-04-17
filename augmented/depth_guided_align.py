@@ -24,24 +24,26 @@ class DepthGuidedAlignConfig:
     # (0, 0) is top-left and (1, 1) is bottom-right.
     align_target_u_ratio: float = 0.50
     align_target_v_ratio: float = 0.78
-    align_target_depth: float = 0.85
+    align_target_depth: float = 0.87
 
     detect_percentile: float = 5.0
     detect_object_depth_threshold: float = 0.9
     min_near_pixels: int = 80
-    trigger_target_radius_px: float = 80.0
+    trigger_target_radius_px: float = 30.0
 
-    align_pixel_tolerance: float = 6.0
+    align_x_tolerance_px: float = 1.0
+    align_y_tolerance_px: float = 24.0
     align_depth_tolerance: float = 0.01
-    align_hold_steps: int = 3
-    max_align_steps: int = 40
+    align_hold_steps: int = 1
+    max_align_steps: int = 20
     close_gripper_steps: int = 4
 
-    x_from_v_gain: float = -1
-    y_from_u_gain: float = -1
+    # Motion conversion gains from image/depth errors to robot translation.
+    x_from_v_gain: float = 0.5
+    y_from_u_gain: float = 1
     z_from_depth_gain: float = -1
     z_bias: float = 0.0
-    max_translation_step: float = 0.1
+    max_translation_step: float = 0.8
 
     gripper_open_value: float = -1.0
     gripper_close_value: float = 1.0
@@ -62,6 +64,8 @@ class DepthFrameAnalysis:
     target_anchor: Tuple[float, float]
     target_cx: Optional[float] = None
     target_cy: Optional[float] = None
+    x_error: Optional[float] = None
+    y_error: Optional[float] = None
     center_dist: Optional[float] = None
     target_depth: Optional[float] = None
     depth_error: Optional[float] = None
@@ -114,6 +118,8 @@ class DepthGuidedAligner:
                 self._mode = "align"
                 self._align_steps = 0
                 self._align_hold_steps = 0
+                if self._config.once_per_episode:
+                    self._used_once = True
                 return self._build_alignment_action(detected_object, target_point), "depth align triggered"
             return None, None
 
@@ -122,9 +128,10 @@ class DepthGuidedAligner:
 
             if detected_object is None or target_point is None:
                 if self._align_steps >= self._config.max_align_steps:
-                    self._mode = "close"
-                    self._close_steps = 0
-                    return self._close_gripper_action(), "depth align timed out, close gripper"
+                    self._mode = "idle"
+                    self._align_steps = 0
+                    self._align_hold_steps = 0
+                    return None, "depth align timed out, back to VLA"
                 return self._hold_open_action(), None
 
             action = self._build_alignment_action(detected_object, target_point)
@@ -139,9 +146,10 @@ class DepthGuidedAligner:
                 return self._close_gripper_action(), "depth align done, close gripper"
 
             if self._align_steps >= self._config.max_align_steps:
-                self._mode = "close"
-                self._close_steps = 0
-                return self._close_gripper_action(), "depth align max steps reached, close gripper"
+                self._mode = "idle"
+                self._align_steps = 0
+                self._align_hold_steps = 0
+                return None, "depth align max steps reached, back to VLA"
 
             return action, None
 
@@ -152,8 +160,6 @@ class DepthGuidedAligner:
                 self._mode = "idle"
                 self._align_steps = 0
                 self._align_hold_steps = 0
-                if self._config.once_per_episode:
-                    self._used_once = True
                 return action, "depth align finished, back to VLA"
             return action, None
 
@@ -179,6 +185,8 @@ class DepthGuidedAligner:
         depth_error = self._compute_depth_error(detected_object)
         depth_gap_abs = abs(depth_error)
         is_aligned = self._is_object_aligned(detected_object, target_point)
+        x_error = float(detected_object.cx - target_point[0])
+        y_error = float(detected_object.cy - target_point[1])
 
         return DepthFrameAnalysis(
             target_found=True,
@@ -186,6 +194,8 @@ class DepthGuidedAligner:
             target_anchor=target_point,
             target_cx=detected_object.cx,
             target_cy=detected_object.cy,
+            x_error=x_error,
+            y_error=y_error,
             center_dist=center_dist,
             target_depth=target_depth,
             depth_error=depth_error,
@@ -380,10 +390,10 @@ class DepthGuidedAligner:
     def _is_object_aligned(self, detected_object: DepthObject, target_point: Tuple[float, float]) -> bool:
         dx = detected_object.cx - target_point[0]
         dy = detected_object.cy - target_point[1]
-        center_dist = float(np.hypot(dx, dy))
         depth_error = abs(self._compute_depth_error(detected_object))
         return (
-            center_dist <= self._config.align_pixel_tolerance
+            abs(dx) <= self._config.align_x_tolerance_px
+            and abs(dy) <= self._config.align_y_tolerance_px
             and depth_error <= self._config.align_depth_tolerance
         )
 
