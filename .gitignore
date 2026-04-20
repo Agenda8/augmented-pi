@@ -1,6 +1,5 @@
 
-eval1.sh
-eval2.sh
+*.sh
 download_gs.py
 
 # Data directories.
