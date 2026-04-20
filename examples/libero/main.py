@@ -159,6 +159,10 @@ def eval_libero(args: Args) -> None:
             args.seed,
             enable_depth=args.save_depth or args.enable_depth_align,
         )
+        wrist_cam_id = _get_camera_id(env, "robot0_eye_in_hand")
+        wrist_cam_fovy_deg = _get_camera_fovy_deg(env, wrist_cam_id)
+        if depth_aligner is not None and wrist_cam_id is None:
+            logging.warning("DepthAlign: wrist camera id not found, pose-guided XY will fall back to gain mapping")
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -273,11 +277,20 @@ def eval_libero(args: Args) -> None:
                     override_action = None
                     if depth_aligner is not None:
                         align_depth = wrist_depth
+                        eef_pos = _get_obs_vector(obs, "robot0_eef_pos")
+                        eef_quat = _get_obs_vector(obs, "robot0_eef_quat")
+                        wrist_cam_rot_base = _get_camera_rotmat(env, wrist_cam_id)
                         align_analysis = depth_aligner.analyze_depth_frame(
                             align_depth,
                             include_mask=args.save_depth_align_trace,
                         )
-                        override_action, align_event = depth_aligner.get_control_action(align_depth)
+                        override_action, align_event = depth_aligner.get_control_action(
+                            align_depth,
+                            eef_pos=eef_pos,
+                            eef_quat=eef_quat,
+                            camera_rot_base=wrist_cam_rot_base,
+                            camera_fovy_deg=wrist_cam_fovy_deg,
+                        )
                         align_mode = depth_aligner.get_mode()
                         if align_event:
                             logging.info(
@@ -711,6 +724,47 @@ def _build_depth_align_config(args: Args) -> DepthGuidedAlignConfig:
         enabled=args.enable_depth_align,
         once_per_episode=args.depth_align_once_per_episode,
     )
+
+
+def _get_obs_vector(obs: dict, key: str) -> Optional[np.ndarray]:
+    value = obs.get(key)
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return None
+    return arr
+
+
+def _get_camera_id(env: OffScreenRenderEnv, camera_name: str) -> Optional[int]:
+    try:
+        return int(env.sim.model.camera_name2id(camera_name))
+    except Exception:
+        return None
+
+
+def _get_camera_fovy_deg(env: OffScreenRenderEnv, camera_id: Optional[int]) -> Optional[float]:
+    if camera_id is None:
+        return None
+    try:
+        fovy = float(env.sim.model.cam_fovy[camera_id])
+    except Exception:
+        return None
+    if not np.isfinite(fovy):
+        return None
+    return fovy
+
+
+def _get_camera_rotmat(env: OffScreenRenderEnv, camera_id: Optional[int]) -> Optional[np.ndarray]:
+    if camera_id is None:
+        return None
+    try:
+        cam_xmat = np.asarray(env.sim.data.cam_xmat[camera_id], dtype=np.float64)
+    except Exception:
+        return None
+    if cam_xmat.size != 9:
+        return None
+    return cam_xmat.reshape(3, 3)
 
 
 def _get_depth_observation(obs: dict, key: str) -> Optional[np.ndarray]:

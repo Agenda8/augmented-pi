@@ -38,6 +38,17 @@ class DepthGuidedAlignConfig:
     max_align_steps: int = 20
     close_gripper_steps: int = 4
 
+    # Pose-guided mapping from image errors to base-frame XY translation.
+    # When enabled, the controller uses eef orientation + wrist camera mount to
+    # compute per-step XY displacement in the robot base frame.
+    use_pose_guided_xy: bool = True
+    pose_xy_gain: float = 1.0
+    pose_min_depth: float = 0.05
+    pose_default_camera_fovy_deg: float = 45.0
+    pose_u_to_cam_x_sign: float = -1.0
+    pose_v_to_cam_y_sign: float = -1.0
+    pose_processed_image_is_180_rotated: bool = True
+
     # Motion conversion gains from image/depth errors to robot translation.
     x_from_v_gain: float = 0.5
     y_from_u_gain: float = 1
@@ -89,6 +100,8 @@ class DepthGuidedAligner:
 
     def __init__(self, config: DepthGuidedAlignConfig):
         self._config = config
+        self._camera_fovy_deg = float(config.pose_default_camera_fovy_deg)
+        self._eef_to_cam_rot = None
         self.reset_episode()
 
     def reset_episode(self) -> None:
@@ -98,18 +111,29 @@ class DepthGuidedAligner:
         self._align_hold_steps = 0
         self._close_steps = 0
         self._initial_gripper_mask = None
+        self._eef_to_cam_rot = None
 
     def get_mode(self) -> str:
         return self._mode
 
-    def get_control_action(self, depth: Optional[np.ndarray]) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    def get_control_action(
+        self,
+        depth: Optional[np.ndarray],
+        eef_pos: Optional[np.ndarray] = None,
+        eef_quat: Optional[np.ndarray] = None,
+        camera_rot_base: Optional[np.ndarray] = None,
+        camera_fovy_deg: Optional[float] = None,
+    ) -> Tuple[Optional[np.ndarray], Optional[str]]:
         if not self._config.enabled:
             return None, None
+
+        self._update_pose_context(eef_quat=eef_quat, camera_rot_base=camera_rot_base, camera_fovy_deg=camera_fovy_deg)
 
         if self._mode == "idle" and self._config.once_per_episode and self._used_once:
             return None, None
 
         detected_object, target_point, _ = self._extract_object(depth)
+        depth_shape = self._get_depth_shape(depth)
 
         if self._mode == "idle":
             if detected_object is None or target_point is None:
@@ -120,7 +144,16 @@ class DepthGuidedAligner:
                 self._align_hold_steps = 0
                 if self._config.once_per_episode:
                     self._used_once = True
-                return self._build_alignment_action(detected_object, target_point), "depth align triggered"
+                return (
+                    self._build_alignment_action(
+                        detected_object,
+                        target_point,
+                        depth_shape=depth_shape,
+                        eef_pos=eef_pos,
+                        eef_quat=eef_quat,
+                    ),
+                    "depth align triggered",
+                )
             return None, None
 
         if self._mode == "align":
@@ -134,7 +167,13 @@ class DepthGuidedAligner:
                     return None, "depth align timed out, back to VLA"
                 return self._hold_open_action(), None
 
-            action = self._build_alignment_action(detected_object, target_point)
+            action = self._build_alignment_action(
+                detected_object,
+                target_point,
+                depth_shape=depth_shape,
+                eef_pos=eef_pos,
+                eef_quat=eef_quat,
+            )
             if self._is_object_aligned(detected_object, target_point):
                 self._align_hold_steps += 1
             else:
@@ -401,14 +440,43 @@ class DepthGuidedAligner:
         desired_depth = float(self._config.align_target_depth)
         return float(detected_object.near_depth - desired_depth)
 
-    def _build_alignment_action(self, detected_object: DepthObject, target_point: Tuple[float, float]) -> np.ndarray:
+    def _build_alignment_action(
+        self,
+        detected_object: DepthObject,
+        target_point: Tuple[float, float],
+        depth_shape: Optional[Tuple[int, int]],
+        eef_pos: Optional[np.ndarray],
+        eef_quat: Optional[np.ndarray],
+    ) -> np.ndarray:
         # u: horizontal axis, v: vertical axis in image coordinates
         u_err = (detected_object.cx - target_point[0]) / max(target_point[0], 1.0)
         v_err = (detected_object.cy - target_point[1]) / max(target_point[1], 1.0)
         depth_err = self._compute_depth_error(detected_object)
 
-        dx = float(np.clip(self._config.x_from_v_gain * v_err, -self._config.max_translation_step, self._config.max_translation_step))
-        dy = float(np.clip(self._config.y_from_u_gain * u_err, -self._config.max_translation_step, self._config.max_translation_step))
+        pose_xy = self._compute_pose_guided_xy_delta(
+            detected_object=detected_object,
+            target_point=target_point,
+            depth_shape=depth_shape,
+            eef_quat=eef_quat,
+        )
+        if pose_xy is None:
+            dx = float(
+                np.clip(
+                    self._config.x_from_v_gain * v_err,
+                    -self._config.max_translation_step,
+                    self._config.max_translation_step,
+                )
+            )
+            dy = float(
+                np.clip(
+                    self._config.y_from_u_gain * u_err,
+                    -self._config.max_translation_step,
+                    self._config.max_translation_step,
+                )
+            )
+        else:
+            dx, dy = pose_xy
+
         dz_cmd = self._config.z_bias + self._config.z_from_depth_gain * depth_err
         dz = float(np.clip(dz_cmd, -self._config.max_translation_step, self._config.max_translation_step))
 
@@ -418,6 +486,131 @@ class DepthGuidedAligner:
         action[2] = dz
         action[6] = self._config.gripper_open_value
         return action
+
+    def _update_pose_context(
+        self,
+        eef_quat: Optional[np.ndarray],
+        camera_rot_base: Optional[np.ndarray],
+        camera_fovy_deg: Optional[float],
+    ) -> None:
+        if camera_fovy_deg is not None:
+            fovy = float(camera_fovy_deg)
+            if np.isfinite(fovy) and fovy > 1e-3:
+                self._camera_fovy_deg = fovy
+
+        if not self._config.use_pose_guided_xy:
+            return
+        if eef_quat is None or camera_rot_base is None:
+            return
+
+        eef_rot_base = self._quat_xyzw_to_rotmat(eef_quat)
+        cam_rot_base = np.asarray(camera_rot_base, dtype=np.float64)
+        if cam_rot_base.shape != (3, 3):
+            return
+        self._eef_to_cam_rot = eef_rot_base.T @ cam_rot_base
+
+    def _compute_pose_guided_xy_delta(
+        self,
+        detected_object: DepthObject,
+        target_point: Tuple[float, float],
+        depth_shape: Optional[Tuple[int, int]],
+        eef_quat: Optional[np.ndarray],
+    ) -> Optional[Tuple[float, float]]:
+        if not self._config.use_pose_guided_xy:
+            return None
+        if self._eef_to_cam_rot is None or eef_quat is None:
+            return None
+        if depth_shape is None or len(depth_shape) != 2:
+            return None
+
+        height, width = depth_shape
+        if height <= 1 or width <= 1:
+            return None
+
+        fx, fy = self._compute_focal_lengths(width=width, height=height)
+        if fx <= 1e-6 or fy <= 1e-6:
+            return None
+
+        u_err_px = float(detected_object.cx - target_point[0])
+        v_err_px = float(detected_object.cy - target_point[1])
+
+        if self._config.pose_processed_image_is_180_rotated:
+            u_err_px = -u_err_px
+            v_err_px = -v_err_px
+
+        object_depth = max(float(detected_object.near_depth), float(self._config.pose_min_depth))
+        delta_cam_x = self._config.pose_u_to_cam_x_sign * (u_err_px * object_depth / fx)
+        delta_cam_y = self._config.pose_v_to_cam_y_sign * (v_err_px * object_depth / fy)
+        delta_cam = np.array([delta_cam_x, delta_cam_y, 0.0], dtype=np.float64)
+
+        eef_rot_base = self._quat_xyzw_to_rotmat(eef_quat)
+        cam_rot_base = eef_rot_base @ self._eef_to_cam_rot
+        delta_base = cam_rot_base @ delta_cam
+
+        gain = float(self._config.pose_xy_gain)
+        dx = float(
+            np.clip(
+                gain * delta_base[0],
+                -self._config.max_translation_step,
+                self._config.max_translation_step,
+            )
+        )
+        dy = float(
+            np.clip(
+                gain * delta_base[1],
+                -self._config.max_translation_step,
+                self._config.max_translation_step,
+            )
+        )
+        return dx, dy
+
+    def _compute_focal_lengths(self, width: int, height: int) -> Tuple[float, float]:
+        fovy = float(np.clip(self._camera_fovy_deg, 1.0, 179.0))
+        half_fovy_rad = np.deg2rad(fovy) * 0.5
+        fy = 0.5 * float(height) / np.tan(half_fovy_rad)
+        fx = fy * (float(width) / max(float(height), 1.0))
+        return float(fx), float(fy)
+
+    def _get_depth_shape(self, depth: Optional[np.ndarray]) -> Optional[Tuple[int, int]]:
+        if depth is None:
+            return None
+        arr = np.asarray(depth)
+        if arr.ndim == 3 and arr.shape[-1] >= 1:
+            arr = arr[..., 0]
+        if arr.ndim != 2:
+            return None
+        return int(arr.shape[0]), int(arr.shape[1])
+
+    def _quat_xyzw_to_rotmat(self, quat_xyzw: np.ndarray) -> np.ndarray:
+        quat = np.asarray(quat_xyzw, dtype=np.float64).reshape(-1)
+        if quat.size != 4:
+            return np.eye(3, dtype=np.float64)
+
+        norm = float(np.linalg.norm(quat))
+        if norm < 1e-9:
+            return np.eye(3, dtype=np.float64)
+
+        x, y, z, w = quat / norm
+
+        xx = x * x
+        yy = y * y
+        zz = z * z
+        ww = w * w
+        xy = x * y
+        xz = x * z
+        yz = y * z
+        xw = x * w
+        yw = y * w
+        zw = z * w
+
+        return np.array(
+            [
+                [ww + xx - yy - zz, 2.0 * (xy - zw), 2.0 * (xz + yw)],
+                [2.0 * (xy + zw), ww - xx + yy - zz, 2.0 * (yz - xw)],
+                [2.0 * (xz - yw), 2.0 * (yz + xw), ww - xx - yy + zz],
+            ],
+            dtype=np.float64,
+        )
 
     def _hold_open_action(self) -> np.ndarray:
         action = np.zeros(7, dtype=np.float32)
