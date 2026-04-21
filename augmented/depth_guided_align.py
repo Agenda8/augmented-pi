@@ -32,7 +32,7 @@ class DepthGuidedAlignConfig:
     trigger_target_radius_px: float = 30.0
 
     align_x_tolerance_px: float = 10.0
-    align_y_tolerance_px: float = 6.0
+    align_y_tolerance_px: float = 10.0
     align_depth_tolerance: float = 0.02
     align_hold_steps: int = 1
     max_align_steps: int = 30
@@ -42,11 +42,11 @@ class DepthGuidedAlignConfig:
     # When enabled, the controller uses eef orientation + wrist camera mount to
     # compute per-step XY displacement in the robot base frame.
     use_pose_guided_xy: bool = True
-    pose_xy_gain: float = 1.8
+    pose_xy_gain: float = 1.0
     pose_min_depth: float = 0.05
     pose_default_camera_fovy_deg: float = 45.0
-    pose_u_to_cam_x_sign: float = -1.0
-    pose_v_to_cam_y_sign: float = -1.0
+    pose_u_to_cam_x_sign: float = 1.0
+    pose_v_to_cam_y_sign: float = 1.0
     pose_processed_image_is_180_rotated: bool = True
 
     # Motion conversion gains from image/depth errors to robot translation.
