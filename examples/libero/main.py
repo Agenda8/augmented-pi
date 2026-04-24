@@ -86,7 +86,6 @@ class Args:
     # Depth-guided fine alignment parameters
     #################################################################################################################
     enable_depth_align: bool = False  # Use depth heuristic to align before gripper close
-    depth_align_once_per_episode: bool = True  # Trigger at most once for each episode
 
     save_depth_align_trace: bool = False  # Save per-frame detection overlays and alignment state/events during eval
     depth_align_trace_out_path: str = "data/libero/depth_align_trace"  # Output directory for depth-align traces
@@ -184,6 +183,7 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             done = False
+            last_gripper_cmd = float(LIBERO_DUMMY_ACTION[6])
             replay_images = []
             replay_wrist_images = []
             replay_depths = []
@@ -231,6 +231,7 @@ def eval_libero(args: Args) -> None:
                     # IMPORTANT: Do nothing for the first few timesteps because the simulator drops objects
                     # and we need to wait for them to fall
                     if t < args.num_steps_wait:
+                        last_gripper_cmd = float(LIBERO_DUMMY_ACTION[6])
                         obs, reward, done, info = env.step(LIBERO_DUMMY_ACTION)
                         t += 1
                         continue
@@ -283,6 +284,7 @@ def eval_libero(args: Args) -> None:
                         align_analysis = depth_aligner.analyze_depth_frame(
                             align_depth,
                             include_mask=args.save_depth_align_trace,
+                            gripper_cmd=last_gripper_cmd,
                         )
                         override_action, align_event = depth_aligner.get_control_action(
                             align_depth,
@@ -290,6 +292,7 @@ def eval_libero(args: Args) -> None:
                             eef_quat=eef_quat,
                             camera_rot_base=wrist_cam_rot_base,
                             camera_fovy_deg=wrist_cam_fovy_deg,
+                            gripper_cmd=last_gripper_cmd,
                         )
                         align_mode = depth_aligner.get_mode()
                         if align_event:
@@ -420,6 +423,10 @@ def eval_libero(args: Args) -> None:
                         current_chunk_actions.append(np.asarray(action, dtype=np.float32))
 
                     episode_actions.append(action)
+                    if action.shape[0] > 6 and np.isfinite(action[6]):
+                        last_gripper_cmd = float(action[6])
+                    else:
+                        last_gripper_cmd = None
 
                     if not action_plan and current_chunk_actions:
                         prev_executed_chunk = np.asarray(current_chunk_actions, dtype=np.float32)
@@ -722,7 +729,6 @@ def _get_libero_env(task, resolution, seed, enable_depth=False):
 def _build_depth_align_config(args: Args) -> DepthGuidedAlignConfig:
     return DepthGuidedAlignConfig(
         enabled=args.enable_depth_align,
-        once_per_episode=args.depth_align_once_per_episode,
     )
 
 

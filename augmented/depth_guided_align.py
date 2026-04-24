@@ -9,7 +9,6 @@ class DepthGuidedAlignConfig:
     """Config for a simple depth-based near-object alignment controller."""
 
     enabled: bool = False
-    once_per_episode: bool = True
 
     roi_top_ratio: float = 0.10
     roi_bottom_ratio: float = 0.95
@@ -37,6 +36,11 @@ class DepthGuidedAlignConfig:
     align_hold_steps: int = 1
     max_align_steps: int = 30
     close_gripper_steps: int = 4
+
+    # Only allow depth recognition / triggering when recent commanded gripper
+    # actions have stayed open for a history window (useful for multi-object pick tasks).
+    require_open_gripper_for_detection: bool = True
+    open_gripper_cmd_history_steps: int = 20
 
     # Pose-guided mapping from image errors to base-frame XY translation.
     # When enabled, the controller uses eef orientation + wrist camera mount to
@@ -106,12 +110,12 @@ class DepthGuidedAligner:
 
     def reset_episode(self) -> None:
         self._mode = "idle"
-        self._used_once = False
         self._align_steps = 0
         self._align_hold_steps = 0
         self._close_steps = 0
         self._initial_gripper_mask = None
         self._eef_to_cam_rot = None
+        self._gripper_open_history = []
 
     def get_mode(self) -> str:
         return self._mode
@@ -123,27 +127,26 @@ class DepthGuidedAligner:
         eef_quat: Optional[np.ndarray] = None,
         camera_rot_base: Optional[np.ndarray] = None,
         camera_fovy_deg: Optional[float] = None,
+        gripper_cmd: Optional[float] = None,
     ) -> Tuple[Optional[np.ndarray], Optional[str]]:
         if not self._config.enabled:
             return None, None
 
         self._update_pose_context(eef_quat=eef_quat, camera_rot_base=camera_rot_base, camera_fovy_deg=camera_fovy_deg)
-
-        if self._mode == "idle" and self._config.once_per_episode and self._used_once:
-            return None, None
-
-        detected_object, target_point, _ = self._extract_object(depth)
-        depth_shape = self._get_depth_shape(depth)
+        self._update_gripper_open_history(gripper_cmd)
 
         if self._mode == "idle":
+            if not self._can_run_detection_now():
+                return None, None
+
+            detected_object, target_point, _ = self._extract_object(depth)
+            depth_shape = self._get_depth_shape(depth)
             if detected_object is None or target_point is None:
                 return None, None
             if self._should_trigger(detected_object, target_point):
                 self._mode = "align"
                 self._align_steps = 0
                 self._align_hold_steps = 0
-                if self._config.once_per_episode:
-                    self._used_once = True
                 return (
                     self._build_alignment_action(
                         detected_object,
@@ -158,6 +161,8 @@ class DepthGuidedAligner:
 
         if self._mode == "align":
             self._align_steps += 1
+            detected_object, target_point, _ = self._extract_object(depth)
+            depth_shape = self._get_depth_shape(depth)
 
             if detected_object is None or target_point is None:
                 if self._align_steps >= self._config.max_align_steps:
@@ -204,7 +209,31 @@ class DepthGuidedAligner:
 
         return None, None
 
-    def analyze_depth_frame(self, depth: Optional[np.ndarray], include_mask: bool = False) -> DepthFrameAnalysis:
+    def analyze_depth_frame(
+        self,
+        depth: Optional[np.ndarray],
+        include_mask: bool = False,
+        gripper_cmd: Optional[float] = None,
+    ) -> DepthFrameAnalysis:
+        # History is updated in get_control_action once per control step.
+        # Keep analysis read-only to avoid counting the same step twice.
+        if self._mode == "idle" and not self._can_run_detection_now():
+            target_depth = float(self._config.align_target_depth)
+            target_point = (0.0, 0.0)
+            depth_shape = self._get_depth_shape(depth)
+            if depth_shape is not None:
+                h, w = depth_shape
+                target_point = self._compute_target_point(w, h)
+            return DepthFrameAnalysis(
+                target_found=False,
+                should_trigger=False,
+                target_anchor=target_point,
+                target_depth=target_depth,
+                pixel_count=0,
+                near_mask=None,
+                gripper_mask=self._initial_gripper_mask if include_mask else None,
+            )
+
         detected_object, target_point, near_mask = self._extract_object(depth, include_mask=include_mask)
         target_depth = float(self._config.align_target_depth)
         if detected_object is None:
@@ -415,6 +444,30 @@ class DepthGuidedAligner:
         u = float(np.clip(self._config.align_target_u_ratio, 0.0, 1.0))
         v = float(np.clip(self._config.align_target_v_ratio, 0.0, 1.0))
         return ((width - 1) * u, (height - 1) * v)
+
+    def _update_gripper_open_history(self, gripper_cmd: Optional[float]) -> None:
+        if not self._config.require_open_gripper_for_detection:
+            return
+
+        window = max(1, int(self._config.open_gripper_cmd_history_steps))
+        is_open = False
+
+        if gripper_cmd is not None and np.isfinite(gripper_cmd):
+            value = float(gripper_cmd)
+            is_open = value <= 0
+
+        self._gripper_open_history.append(bool(is_open))
+        if len(self._gripper_open_history) > window:
+            self._gripper_open_history = self._gripper_open_history[-window:]
+
+    def _can_run_detection_now(self) -> bool:
+        if not self._config.require_open_gripper_for_detection:
+            return True
+
+        window = max(1, int(self._config.open_gripper_cmd_history_steps))
+        if len(self._gripper_open_history) < window:
+            return False
+        return all(self._gripper_open_history[-window:])
 
     def _should_trigger(self, detected_object: DepthObject, target_point: Tuple[float, float]) -> bool:
         dx = detected_object.cx - target_point[0]
