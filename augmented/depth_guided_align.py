@@ -32,9 +32,11 @@ class DepthGuidedAlignConfig:
 
     align_x_tolerance_px: float = 10.0
     align_y_tolerance_px: float = 10.0
-    align_depth_tolerance: float = 0.02
+    align_depth_tolerance: float = 0.03
     align_hold_steps: int = 1
-    max_align_steps: int = 30
+    max_align_steps: int = 50
+    # Prevent immediate re-trigger after a failed/timeout alignment attempt.
+    retry_cooldown_steps_after_failure: int = 30
     close_gripper_steps: int = 4
 
     # Only allow depth recognition / triggering when recent commanded gripper
@@ -113,6 +115,7 @@ class DepthGuidedAligner:
         self._align_steps = 0
         self._align_hold_steps = 0
         self._close_steps = 0
+        self._retry_cooldown_steps = 0
         self._initial_gripper_mask = None
         self._eef_to_cam_rot = None
         self._gripper_open_history = []
@@ -136,6 +139,10 @@ class DepthGuidedAligner:
         self._update_gripper_open_history(gripper_cmd)
 
         if self._mode == "idle":
+            if self._retry_cooldown_steps > 0:
+                self._retry_cooldown_steps -= 1
+                return None, None
+
             if not self._can_run_detection_now():
                 return None, None
 
@@ -169,6 +176,7 @@ class DepthGuidedAligner:
                     self._mode = "idle"
                     self._align_steps = 0
                     self._align_hold_steps = 0
+                    self._start_retry_cooldown()
                     return None, "depth align timed out, back to VLA"
                 return self._hold_open_action(), None
 
@@ -193,6 +201,7 @@ class DepthGuidedAligner:
                 self._mode = "idle"
                 self._align_steps = 0
                 self._align_hold_steps = 0
+                self._start_retry_cooldown()
                 return None, "depth align max steps reached, back to VLA"
 
             return action, None
@@ -217,7 +226,7 @@ class DepthGuidedAligner:
     ) -> DepthFrameAnalysis:
         # History is updated in get_control_action once per control step.
         # Keep analysis read-only to avoid counting the same step twice.
-        if self._mode == "idle" and not self._can_run_detection_now():
+        if self._mode == "idle" and (self._retry_cooldown_steps > 0 or not self._can_run_detection_now()):
             target_depth = float(self._config.align_target_depth)
             target_point = (0.0, 0.0)
             depth_shape = self._get_depth_shape(depth)
@@ -468,6 +477,11 @@ class DepthGuidedAligner:
         if len(self._gripper_open_history) < window:
             return False
         return all(self._gripper_open_history[-window:])
+
+    def _start_retry_cooldown(self) -> None:
+        self._retry_cooldown_steps = max(0, int(self._config.retry_cooldown_steps_after_failure))
+        # Also clear history so a fresh open-command window is required.
+        self._gripper_open_history = []
 
     def _should_trigger(self, detected_object: DepthObject, target_point: Tuple[float, float]) -> bool:
         dx = detected_object.cx - target_point[0]

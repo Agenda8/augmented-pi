@@ -220,7 +220,7 @@ def eval_libero(args: Args) -> None:
             depth_align_events = []
             if args.save_depth_align_trace and depth_aligner is not None:
                 depth_align_trace_episode_dir = (
-                    pathlib.Path(args.depth_align_trace_out_path)
+                    pathlib.Path(args.depth_align_trace_out_path) / f"episode_{episode_global_idx:03d}"
                 )
                 depth_align_trace_frames_dir = depth_align_trace_episode_dir / "frames"
                 depth_align_trace_frames_dir.mkdir(parents=True, exist_ok=True)
