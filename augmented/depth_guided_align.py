@@ -28,11 +28,11 @@ class DepthGuidedAlignConfig:
     detect_percentile: float = 5.0
     detect_object_depth_threshold: float = 0.9
     min_near_pixels: int = 80
-    trigger_target_radius_px: float = 30.0
+    trigger_target_radius_px: float = 50.0
 
     align_x_tolerance_px: float = 10.0
     align_y_tolerance_px: float = 10.0
-    align_depth_tolerance: float = 0.03
+    align_depth_tolerance: float = 0.02
     align_hold_steps: int = 1
     max_align_steps: int = 50
     # Prevent immediate re-trigger after a failed/timeout alignment attempt.
@@ -58,7 +58,7 @@ class DepthGuidedAlignConfig:
     # Motion conversion gains from image/depth errors to robot translation.
     x_from_v_gain: float = 0.5
     y_from_u_gain: float = 1
-    z_from_depth_gain: float = -1
+    z_from_depth_gain: float = -3
     z_bias: float = 0.0
     max_translation_step: float = 0.8
 
@@ -78,6 +78,8 @@ class DepthObject:
 class DepthFrameAnalysis:
     target_found: bool
     should_trigger: bool
+    can_run_detection_now: bool
+    gripper_cmd: Optional[float]
     target_anchor: Tuple[float, float]
     target_cx: Optional[float] = None
     target_cy: Optional[float] = None
@@ -224,6 +226,11 @@ class DepthGuidedAligner:
         include_mask: bool = False,
         gripper_cmd: Optional[float] = None,
     ) -> DepthFrameAnalysis:
+        can_run_detection_now = self._can_run_detection_now()
+        gripper_cmd_value = None
+        if gripper_cmd is not None and np.isfinite(gripper_cmd):
+            gripper_cmd_value = float(gripper_cmd)
+
         # History is updated in get_control_action once per control step.
         # Keep analysis read-only to avoid counting the same step twice.
         if self._mode == "idle" and (self._retry_cooldown_steps > 0 or not self._can_run_detection_now()):
@@ -236,6 +243,8 @@ class DepthGuidedAligner:
             return DepthFrameAnalysis(
                 target_found=False,
                 should_trigger=False,
+                can_run_detection_now=can_run_detection_now,
+                gripper_cmd=gripper_cmd_value,
                 target_anchor=target_point,
                 target_depth=target_depth,
                 pixel_count=0,
@@ -251,6 +260,8 @@ class DepthGuidedAligner:
             return DepthFrameAnalysis(
                 target_found=False,
                 should_trigger=False,
+                can_run_detection_now=can_run_detection_now,
+                gripper_cmd=gripper_cmd_value,
                 target_anchor=target_point,
                 target_depth=target_depth,
                 pixel_count=0,
@@ -268,6 +279,8 @@ class DepthGuidedAligner:
         return DepthFrameAnalysis(
             target_found=True,
             should_trigger=self._should_trigger(detected_object, target_point),
+            can_run_detection_now=can_run_detection_now,
+            gripper_cmd=gripper_cmd_value,
             target_anchor=target_point,
             target_cx=detected_object.cx,
             target_cy=detected_object.cy,
