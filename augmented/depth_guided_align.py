@@ -28,7 +28,7 @@ class DepthGuidedAlignConfig:
     detect_percentile: float = 5.0
     detect_object_depth_threshold: float = 0.9
     min_near_pixels: int = 80
-    trigger_target_radius_px: float = 50.0
+    trigger_target_radius_px: float = 55.0
 
     align_x_tolerance_px: float = 10.0
     align_y_tolerance_px: float = 10.0
