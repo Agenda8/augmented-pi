@@ -100,7 +100,10 @@ def main(args: Args) -> None:
         max_frames=args.max_frames,
     )
 
-    config = DepthGuidedAlignConfig(enabled=True)
+    config = DepthGuidedAlignConfig(
+        enabled=True,
+        require_open_gripper_for_detection=False,
+    )
     aligner = DepthGuidedAligner(config)
 
     rows = []

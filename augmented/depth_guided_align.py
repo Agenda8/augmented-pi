@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -10,10 +10,10 @@ class DepthGuidedAlignConfig:
 
     enabled: bool = False
 
-    roi_top_ratio: float = 0.10
+    roi_top_ratio: float = 0.50
     roi_bottom_ratio: float = 0.95
-    roi_left_ratio: float = 0.10
-    roi_right_ratio: float = 0.90
+    roi_left_ratio: float = 0.30
+    roi_right_ratio: float = 0.80
 
     mask_bottom_start_ratio: float = 0.55
     mask_depth_value_threshold: float = 0.9
@@ -21,12 +21,12 @@ class DepthGuidedAlignConfig:
 
     # Pixel anchor where we expect the object (e.g., between gripper fingers in wrist view).
     # (0, 0) is top-left and (1, 1) is bottom-right.
-    align_target_u_ratio: float = 0.50
-    align_target_v_ratio: float = 0.78
+    align_target_u_ratio: float = 0.52
+    align_target_v_ratio: float = 0.75
     align_target_depth: float = 0.87
 
     detect_percentile: float = 5.0
-    detect_object_depth_threshold: float = 0.9
+    detect_object_depth_threshold: float = 0.925
     min_near_pixels: int = 80
     trigger_target_radius_px: float = 55.0
 
@@ -36,7 +36,7 @@ class DepthGuidedAlignConfig:
     align_hold_steps: int = 1
     max_align_steps: int = 50
     # Prevent immediate re-trigger after a failed/timeout alignment attempt.
-    retry_cooldown_steps_after_failure: int = 30
+    retry_cooldown_steps_after_failure: int = 50
     close_gripper_steps: int = 4
 
     # Only allow depth recognition / triggering when recent commanded gripper
@@ -58,9 +58,9 @@ class DepthGuidedAlignConfig:
     # Motion conversion gains from image/depth errors to robot translation.
     x_from_v_gain: float = 0.5
     y_from_u_gain: float = 1
-    z_from_depth_gain: float = -3
-    z_bias: float = 0.0
-    max_translation_step: float = 0.8
+    z_from_depth_gain: float = -5
+    z_bias: float = 0
+    max_translation_step: float = 0.1
 
     gripper_open_value: float = -1.0
     gripper_close_value: float = 1.0
@@ -121,6 +121,18 @@ class DepthGuidedAligner:
         self._initial_gripper_mask = None
         self._eef_to_cam_rot = None
         self._gripper_open_history = []
+
+    def initialize_gripper_mask(self, depth: np.ndarray) -> None:
+        """Build the gripper mask from the given depth frame.
+
+        Call this at the start of an episode (after ``reset_episode``) so the
+        mask is ready before the first ``get_control_action`` / ``analyze_depth_frame``.
+        """
+        arr = np.asarray(depth, dtype=np.float32)
+        if arr.ndim == 3 and arr.shape[-1] >= 1:
+            arr = arr[..., 0]
+        if arr.ndim == 2:
+            self._initial_gripper_mask = self._build_initial_gripper_mask(arr)
 
     def get_mode(self) -> str:
         return self._mode
@@ -325,8 +337,12 @@ class DepthGuidedAligner:
 
         roi = arr[y0:y1, x0:x1]
         finite_mask = np.isfinite(roi)
+        # Gripper mask is built on the full image; apply it to the full image
+        # first, then crop to ROI so it only excludes gripper pixels inside ROI.
         if self._initial_gripper_mask is not None:
-            finite_mask &= ~self._initial_gripper_mask[y0:y1, x0:x1]
+            full_finite_mask = np.isfinite(arr)
+            full_finite_mask &= ~self._initial_gripper_mask
+            finite_mask = full_finite_mask[y0:y1, x0:x1]
         if not np.any(finite_mask):
             return None, target_point, None
 
@@ -339,29 +355,46 @@ class DepthGuidedAligner:
         else:
             detect_threshold = float(np.percentile(valid, self._config.detect_percentile))
         near_mask = finite_mask & (roi <= detect_threshold)
-        near_mask = self._largest_connected_component(near_mask)
+        all_components = self._find_all_connected_components(near_mask)
 
-        ys, xs = np.nonzero(near_mask)
-        if ys.size < self._config.min_near_pixels:
+        if not all_components:
             return None, target_point, None
 
-        # Weighted center emphasizes the closest pixels.
-        weights = (detect_threshold - roi[ys, xs]).astype(np.float64) + 1e-6
-        cx = float(np.average(xs + x0, weights=weights))
-        cy = float(np.average(ys + y0, weights=weights))
-        object_depth = float(np.average(roi[ys, xs], weights=weights))
+        # Build a DepthObject for each component and pick the one closest to the anchor.
+        best_object = None
+        best_dist = float("inf")
+        best_component_mask = None
+
+        for comp_mask in all_components:
+            ys, xs = np.nonzero(comp_mask)
+            if ys.size < self._config.min_near_pixels:
+                continue
+
+            weights = (detect_threshold - roi[ys, xs]).astype(np.float64) + 1e-6
+            cx = float(np.average(xs + x0, weights=weights))
+            cy = float(np.average(ys + y0, weights=weights))
+            object_depth = float(np.average(roi[ys, xs], weights=weights))
+            dist = float(np.hypot(cx - target_point[0], cy - target_point[1]))
+
+            if dist < best_dist:
+                best_dist = dist
+                best_object = DepthObject(
+                    cx=cx,
+                    cy=cy,
+                    near_depth=object_depth,
+                    pixel_count=int(ys.size),
+                )
+                best_component_mask = comp_mask
+
+        if best_object is None:
+            return None, target_point, None
 
         full_mask = None
         if include_mask:
             full_mask = np.zeros((h, w), dtype=bool)
-            full_mask[y0:y1, x0:x1] = near_mask
+            full_mask[y0:y1, x0:x1] = best_component_mask
 
-        return DepthObject(
-            cx=cx,
-            cy=cy,
-            near_depth=object_depth,
-            pixel_count=int(ys.size),
-        ), target_point, full_mask
+        return best_object, target_point, full_mask
 
     def _build_initial_gripper_mask(self, depth_2d: np.ndarray) -> np.ndarray:
         h, w = depth_2d.shape
@@ -420,6 +453,48 @@ class DepthGuidedAligner:
                 stack.append((y, x + 1))
 
         return visited
+
+    def _find_all_connected_components(self, mask: np.ndarray) -> List[np.ndarray]:
+        """Return a list of boolean masks, one per connected component, sorted by pixel count descending."""
+        h, w = mask.shape
+        visited = np.zeros_like(mask, dtype=bool)
+        components = []
+
+        for y0 in range(h):
+            for x0 in range(w):
+                if not mask[y0, x0] or visited[y0, x0]:
+                    continue
+
+                stack = [(y0, x0)]
+                visited[y0, x0] = True
+                component_pixels = []
+
+                while stack:
+                    y, x = stack.pop()
+                    component_pixels.append((y, x))
+
+                    if y > 0 and mask[y - 1, x] and not visited[y - 1, x]:
+                        visited[y - 1, x] = True
+                        stack.append((y - 1, x))
+                    if y < h - 1 and mask[y + 1, x] and not visited[y + 1, x]:
+                        visited[y + 1, x] = True
+                        stack.append((y + 1, x))
+                    if x > 0 and mask[y, x - 1] and not visited[y, x - 1]:
+                        visited[y, x - 1] = True
+                        stack.append((y, x - 1))
+                    if x < w - 1 and mask[y, x + 1] and not visited[y, x + 1]:
+                        visited[y, x + 1] = True
+                        stack.append((y, x + 1))
+
+                if len(component_pixels) >= self._config.min_near_pixels:
+                    comp_mask = np.zeros_like(mask, dtype=bool)
+                    for y, x in component_pixels:
+                        comp_mask[y, x] = True
+                    components.append(comp_mask)
+
+        # Sort by pixel count descending so the largest is first (fallback).
+        components.sort(key=lambda m: int(np.count_nonzero(m)), reverse=True)
+        return components
 
     def _largest_connected_component(self, mask: np.ndarray) -> np.ndarray:
         h, w = mask.shape

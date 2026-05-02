@@ -175,6 +175,7 @@ def eval_libero(args: Args) -> None:
             prev_executed_chunk = None
             if depth_aligner is not None:
                 depth_aligner.reset_episode()
+                _gripper_mask_initialized = False
 
             # Set initial states
             init_state_idx = args.fixed_initial_state_idx if args.fixed_initial_state_idx is not None else episode_idx
@@ -281,6 +282,9 @@ def eval_libero(args: Args) -> None:
                         eef_pos = _get_obs_vector(obs, "robot0_eef_pos")
                         eef_quat = _get_obs_vector(obs, "robot0_eef_quat")
                         wrist_cam_rot_base = _get_camera_rotmat(env, wrist_cam_id)
+                        if not _gripper_mask_initialized and align_depth is not None:
+                            depth_aligner.initialize_gripper_mask(align_depth)
+                            _gripper_mask_initialized = True
                         align_analysis = depth_aligner.analyze_depth_frame(
                             align_depth,
                             include_mask=args.save_depth_align_trace,
@@ -297,10 +301,8 @@ def eval_libero(args: Args) -> None:
                         align_mode = depth_aligner.get_mode()
                         if align_event:
                             logging.info(
-                                "[DepthAlign] %s (task_id=%d episode=%d t=%d)",
+                                "[DepthAlign] %s (t=%d)",
                                 align_event,
-                                task_id,
-                                episode_idx + 1,
                                 t,
                             )
                             if args.save_depth_align_trace:
