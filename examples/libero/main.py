@@ -52,6 +52,7 @@ class Args:
     #################################################################################################################
     save_video: bool = False  # Whether to save videos
     save_failure: bool = False  # Whether to save failed episode data (actions + frames) for analysis
+    save_success: bool = False  # Whether to save successful episode data (actions + frames + depth) for analysis
     save_frame: bool = False  # Whether to save per-episode frame images
     save_depth: bool = False  # Whether to save per-episode depth maps (raw + visualization)
     save_actions: bool = False  # Whether to save per-episode actions
@@ -61,6 +62,7 @@ class Args:
     depth_out_path: str = "data/libero/depth"  # Path to save per-episode depth maps
     actions_out_path: str = "data/libero/actions"  # Path to save per-episode actions
     failure_path: str = "data/libero/failure"  # Path to save failed episode data for analysis
+    success_path: str = "data/libero/success"  # Path to save successful episode data for analysis
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -156,7 +158,7 @@ def eval_libero(args: Args) -> None:
             task,
             LIBERO_ENV_RESOLUTION,
             args.seed,
-            enable_depth=args.save_depth or args.enable_depth_align,
+            enable_depth=args.save_depth or args.enable_depth_align or args.save_success,
         )
         wrist_cam_id = _get_camera_id(env, "robot0_eye_in_hand")
         wrist_cam_fovy_deg = _get_camera_fovy_deg(env, wrist_cam_id)
@@ -510,6 +512,45 @@ def eval_libero(args: Args) -> None:
                                 wrist_depth_dir / f"wrist_depth_{frame_idx:03d}.png",
                                 _depth_to_vis(depth_frame),
                             )
+
+            # Success saving  (save first successful episode per task for alignment parameter tuning)
+            if args.save_success and done:
+                success_path = pathlib.Path(args.success_path)
+                success_path.mkdir(parents=True, exist_ok=True)
+                wrist_frames_dir = success_path / "wrist_frames"
+                wrist_depth_dir = success_path / "wrist_depth"
+                frames_dir = success_path / "frames"
+                depth_dir = success_path / "depth"
+                wrist_frames_dir.mkdir(parents=True, exist_ok=True)
+                wrist_depth_dir.mkdir(parents=True, exist_ok=True)
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                depth_dir.mkdir(parents=True, exist_ok=True)
+
+                # Actions
+                np.save(success_path / "actions.npy", np.asarray(episode_actions, dtype=np.float32))
+
+                # Wrist images
+                for frame_idx, wrist_frame in enumerate(replay_wrist_images):
+                    imageio.imsave(wrist_frames_dir / f"wrist_frame_{frame_idx:03d}.png", wrist_frame)
+
+                # Agent-view images
+                for frame_idx, frame in enumerate(replay_images):
+                    imageio.imsave(frames_dir / f"frame_{frame_idx:03d}.png", frame)
+
+                # Depth (raw numpy + visualization)
+                if replay_depths:
+                    np.save(success_path / "depth.npy", np.asarray(replay_depths, dtype=np.float32))
+                    for frame_idx, depth_frame in enumerate(replay_depths):
+                        imageio.imsave(depth_dir / f"depth_{frame_idx:03d}.png", _depth_to_vis(depth_frame))
+                if replay_wrist_depths:
+                    np.save(success_path / "wrist_depth.npy", np.asarray(replay_wrist_depths, dtype=np.float32))
+                    for frame_idx, depth_frame in enumerate(replay_wrist_depths):
+                        imageio.imsave(
+                            wrist_depth_dir / f"wrist_depth_{frame_idx:03d}.png",
+                            _depth_to_vis(depth_frame),
+                        )
+
+                logging.info(f"Saved successful episode data to {success_path}")
 
             # Save a replay video of the episode
             if args.save_video:
