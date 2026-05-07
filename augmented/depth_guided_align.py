@@ -26,7 +26,7 @@ class DepthGuidedAlignConfig:
     align_target_depth: float = 0.87
 
     detect_percentile: float = 5.0
-    detect_object_depth_threshold: float = 0.925
+    detect_object_depth_threshold: float = 0.9
     min_near_pixels: int = 80
     trigger_target_radius_px: float = 55.0
 
@@ -60,7 +60,7 @@ class DepthGuidedAlignConfig:
     y_from_u_gain: float = 1
     z_from_depth_gain: float = -5
     z_bias: float = 0
-    max_translation_step: float = 0.1
+    max_translation_step: float = 0.5
 
     gripper_open_value: float = -1.0
     gripper_close_value: float = 1.0
