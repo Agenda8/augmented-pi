@@ -10,9 +10,9 @@ class DepthGuidedAlignConfig:
 
     enabled: bool = False
 
-    roi_top_ratio: float = 0.50
-    roi_bottom_ratio: float = 0.95
-    roi_left_ratio: float = 0.30
+    roi_top_ratio: float = 0.45
+    roi_bottom_ratio: float = 0.85
+    roi_left_ratio: float = 0.25
     roi_right_ratio: float = 0.80
 
     mask_bottom_start_ratio: float = 0.55
@@ -21,7 +21,7 @@ class DepthGuidedAlignConfig:
 
     # Pixel anchor where we expect the object (e.g., between gripper fingers in wrist view).
     # (0, 0) is top-left and (1, 1) is bottom-right.
-    align_target_u_ratio: float = 0.52
+    align_target_u_ratio: float = 0.54
     align_target_v_ratio: float = 0.75
     align_target_depth: float = 0.87
 
@@ -186,13 +186,10 @@ class DepthGuidedAligner:
             depth_shape = self._get_depth_shape(depth)
 
             if detected_object is None or target_point is None:
-                if self._align_steps >= self._config.max_align_steps:
-                    self._mode = "idle"
-                    self._align_steps = 0
-                    self._align_hold_steps = 0
-                    self._start_retry_cooldown()
-                    return None, "depth align timed out, back to VLA"
-                return self._hold_open_action(), None
+                self._mode = "idle"
+                self._align_steps = 0
+                self._align_hold_steps = 0
+                return None, "depth align object lost, back to VLA"
 
             action = self._build_alignment_action(
                 detected_object,
